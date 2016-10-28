@@ -55,6 +55,7 @@ typedef struct qthread_addrstat_s {
 #endif
     uint_fast8_t          full;
     uint_fast8_t          valid;
+    uint_fast8_t          removable;
 } qthread_addrstat_t;
 
 #ifdef UNPOOLED

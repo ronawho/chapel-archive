@@ -424,6 +424,12 @@ int       qthread_queue_destroy(qthread_queue_t q);
  * (full, no waiters) state at any one time.
  */
 
+
+/* This function can prevent or allow full sync vars with no pending operations
+ * to be removed from the hash table as an optimization */
+void qthread_feb_set_removable(const aligned_t *addr,
+                               const uint_fast8_t removable);
+
 /* This function is just to assist with debugging; it returns 1 if the address
  * is full, and 0 if the address is empty */
 int qthread_feb_status(const aligned_t *addr);

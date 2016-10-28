@@ -260,6 +260,50 @@ static int qthread_feb_blocker_func(void        *dest,
  * may need to move to a new mechanism.
  */
 
+
+void API_FUNC qthread_feb_set_removable(const aligned_t *addr,
+                                        const uint_fast8_t removable)
+{                      /*{{{ */
+    const aligned_t *alignedaddr;
+
+    qthread_debug(FEB_CALLS, "addr=%p (tid=%u)\n", addr, qthread_id());
+    qthread_addrstat_t *m;
+    const int           lockbin = QTHREAD_CHOOSE_STRIPE2(addr);
+
+    QALIGN(addr, alignedaddr);
+    QTHREAD_COUNT_THREADS_BINCOUNTER(febs, lockbin);
+#ifdef LOCK_FREE_FEBS
+    do {
+        m = qt_hash_get(FEBs[lockbin], (void *)alignedaddr);
+        if (!m) { break; }
+        hazardous_ptr(0, m);
+        if (m != qt_hash_get(FEBs[lockbin], (void *)alignedaddr)) { continue; }
+        if (!m->valid) { continue; }
+        QTHREAD_FASTLOCK_LOCK(&m->lock);
+        if (!m->valid) {
+            QTHREAD_FASTLOCK_UNLOCK(&m->lock);
+            continue;
+        }
+        m->removable = removable;
+        QTHREAD_FASTLOCK_UNLOCK(&m->lock);
+        break;
+    } while (1);
+#else  /* ifdef LOCK_FREE_FEBS */
+    qt_hash_lock(FEBs[lockbin]); {
+        m = (qthread_addrstat_t *)qt_hash_get_locked(FEBs[lockbin],
+                                                     (void *)alignedaddr);
+        if (m) {
+            QTHREAD_FASTLOCK_LOCK(&m->lock);
+            m->removable = removable;
+            QTHREAD_FASTLOCK_UNLOCK(&m->lock);
+        }
+    }
+    qt_hash_unlock(FEBs[lockbin]);
+#endif  /* ifdef LOCK_FREE_FEBS */
+    qthread_debug(FEB_BEHAVIOR, "addr %p is %i\n", addr, (int)removable);
+}                      /*}}} */
+
+
 /* This is just a little function that should help in debugging */
 int API_FUNC qthread_feb_status(const aligned_t *addr)
 {                      /*{{{ */
@@ -434,7 +478,7 @@ static QINLINE void qthread_gotlock_empty_inner(qthread_shepherd_t *shep,
         FREE_ADDRRES(X);
         qthread_gotlock_fill_inner(shep, m, maddr, 1, precond_tasks);
     }
-    if ((m->full == 1) && (m->EFQ == NULL) && (m->FEQ == NULL) && (m->FFQ == NULL) && (m->FFWQ == NULL)) {
+    if ((m->full == 1) && (m->removable == 1) && (m->EFQ == NULL) && (m->FEQ == NULL) && (m->FFQ == NULL) && (m->FFWQ == NULL)) {
         removeable = 1;
     } else {
         removeable = 0;
@@ -555,7 +599,7 @@ static QINLINE void qthread_gotlock_fill_inner(qthread_shepherd_t *shep,
     }
     if (recursive == 0) {
         int removeable;
-        if ((m->EFQ == NULL) && (m->FEQ == NULL) && (m->full == 1)) {
+        if ((m->removable == 1) && (m->EFQ == NULL) && (m->FEQ == NULL) && (m->full == 1)) {
             qthread_debug(FEB_DETAILS, "m(%p), addr(%p), recursive(%u): addrstat removeable!\n", m, maddr, recursive);
             removeable = 1;
         } else {

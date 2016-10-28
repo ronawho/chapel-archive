@@ -504,11 +504,13 @@ module ChapelSyncvar {
       this.valType = valType;
       this.complete();
       qthread_purge_to(alignedValue, defaultOfAlignedT(valType));
+      qthread_feb_set_removable(alignedValue, 0);
     }
 
     proc deinit() {
       // There's no explicit destroy function, but qthreads reclaims memory
       // for full variables that have no pending operations
+      qthread_feb_set_removable(alignedValue, 1);
       qthread_fill(alignedValue);
     }
 
@@ -950,6 +952,7 @@ private module SyncVarRuntimeSupport {
   extern proc qthread_empty      (const ref dest : aligned_t) : c_int;
   extern proc qthread_fill       (const ref dest : aligned_t) : c_int;
   extern proc qthread_feb_status (const ref dest : aligned_t) : c_int;
+  extern proc qthread_feb_set_removable (const ref dest : aligned_t, const removable: uint(8)) : void;
 }
 
 

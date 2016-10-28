@@ -12,12 +12,13 @@ static QINLINE qthread_addrstat_t *qthread_addrstat_new(void)
 
     if (ret != NULL) {
         QTHREAD_FASTLOCK_INIT(ret->lock);
-        ret->full  = 1;
-        ret->valid = 1;
-        ret->EFQ   = NULL;
-        ret->FEQ   = NULL;
-        ret->FFQ   = NULL;
-        ret->FFWQ  = NULL;
+        ret->full      = 1;
+        ret->valid     = 1;
+        ret->removable = 1;
+        ret->EFQ       = NULL;
+        ret->FEQ       = NULL;
+        ret->FFQ       = NULL;
+        ret->FFWQ      = NULL;
         QTHREAD_EMPTY_TIMER_INIT(ret);
     }
     return ret;
