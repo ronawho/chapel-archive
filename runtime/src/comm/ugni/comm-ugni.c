@@ -821,6 +821,9 @@ typedef struct {
   mpool_idx_base_t next;            // free list index
 } nb_desc_t;
 
+static chpl_comm_nb_handle_t fork_post_handles[NB_DESC_NUM_POOLS];
+static int num_fork_post_handles;
+
 static nb_desc_t nb_desc_pool[NB_DESC_NUM_POOLS][NB_DESC_NUM_PER_POOL];
 static mpool_idx_t nb_desc_pool_head[NB_DESC_NUM_POOLS];
 static atomic_bool nb_desc_pool_lock[NB_DESC_NUM_POOLS];
@@ -961,7 +964,7 @@ typedef struct {
   c_sublocid_t  subloc;  // target sublocale
   unsigned char fast:          1;
   unsigned char blocking:      1;
-  unsigned char payload_size;
+  unsigned short payload_size;
   chpl_fn_int_t fid;
 
   // TODO: is there a way to "compress" this?
@@ -971,7 +974,7 @@ typedef struct {
 // Note: fork_small_call_info_t.payload_size must be able to store
 // a number at least this large. That means it should be at most
 // 255 as long as payload_size is an unsigned char.
-#define MAX_SMALL_CALL_PAYLOAD 64
+#define MAX_SMALL_CALL_PAYLOAD 1024
 #define FORK_T_MAX_SIZE \
   (sizeof(fork_small_call_info_t) + MAX_SMALL_CALL_PAYLOAD)
 
@@ -4522,6 +4525,9 @@ nb_desc_idx_t nb_desc_handle_2_idx(chpl_comm_nb_handle_t h)
 static
 void nb_desc_init(void)
 {
+  //atomic_init_int_least32_t(&num_fork_post_handles, 0);
+
+  // TODO asdf
   int i, j;
 
   if (NB_DESC_NUM_POOLS < comm_dom_cnt)
@@ -7077,6 +7083,7 @@ void fork_call_common(c_nodeid_t locale, c_sublocid_t subloc,
   size_t payload_size = arg_size - sizeof(chpl_comm_on_bundle_t);
   size_t small_msg_size = payload_size + sizeof(fork_small_call_info_t);
   int small = small_msg_size <= sizeof(fork_t);
+  //printf("small_msg_size=%d, sizeof(fork_t)=%d\n", small_msg_size, sizeof(fork_t));
   int large = !small;
   // heapCopyLargeArg is set below and is only relevant when large=true
   int heapCopyLargeArg = false;
@@ -7336,6 +7343,7 @@ void fork_shutdown(c_nodeid_t locale)
 }
 
 
+
 static
 void do_fork_post(c_nodeid_t locale,
                   chpl_bool blocking,
@@ -7344,6 +7352,8 @@ void do_fork_post(c_nodeid_t locale,
 {
   rf_done_t             rf_done;
   gni_post_descriptor_t post_desc;
+  gni_post_descriptor_t* post_desc_p;
+  post_desc_p = &post_desc;
   int                   rbi;
 
   if (blocking) {
@@ -7371,17 +7381,28 @@ void do_fork_post(c_nodeid_t locale,
   //
   acquire_comm_dom_and_req_buf(locale, &rbi);
 
-  post_desc.type            = GNI_POST_FMA_PUT;
-  post_desc.cq_mode         = GNI_CQMODE_GLOBAL_EVENT
+  nb_desc_idx_t          nbdi;
+  nb_desc_t*             nbdp;
+
+  if (!blocking) {
+    nbdi = nb_desc_alloc();
+    nbdp = nb_desc_idx_2_ptr(nbdi);
+    post_desc_p = &nbdp->post_desc;
+    atomic_store_bool(&nbdp->done, false);
+    post_desc_p->post_id         = (uint64_t) (intptr_t) &nbdp->done;
+  }
+
+  post_desc_p->type            = GNI_POST_FMA_PUT;
+  post_desc_p->cq_mode         = GNI_CQMODE_GLOBAL_EVENT
                               | GNI_CQMODE_REMOTE_EVENT;
-  post_desc.dlvr_mode       = GNI_DLVMODE_PERFORMANCE;
-  post_desc.rdma_mode       = 0;
-  post_desc.src_cq_hndl     = 0;
-  post_desc.local_addr      = (uint64_t) (intptr_t) p_rf_req;
-  post_desc.remote_addr     = (uint64_t) (intptr_t)
+  post_desc_p->dlvr_mode       = GNI_DLVMODE_PERFORMANCE;
+  post_desc_p->rdma_mode       = 0;
+  post_desc_p->src_cq_hndl     = 0;
+  post_desc_p->local_addr      = (uint64_t) (intptr_t) p_rf_req;
+  post_desc_p->remote_addr     = (uint64_t) (intptr_t)
                               SEND_SIDE_FORK_REQ_BUF_ADDR(locale, cd_idx, rbi);
-  post_desc.remote_mem_hndl = rf_mdh_map[locale];
-  post_desc.length          = f_size;
+  post_desc_p->remote_mem_hndl = rf_mdh_map[locale];
+  post_desc_p->length          = f_size;
 
   //
   // Initiate the transaction and wait for it to complete.
@@ -7398,12 +7419,70 @@ void do_fork_post(c_nodeid_t locale,
   if (rbi_p != NULL)
     *rbi_p = rbi;
 
-  // note: Do __NOT__ yield while waiting for the ack on a NB fork. We want to
-  // ensure any subsequent NB tasks are spawned before we yield the processor.
-  // For a case like `coforall loc in Locales do on loc do body()` this ensures
-  // we've forked all remote tasks before we give up this task to potentially
-  // work on the body for this locale.
-  post_fma_and_wait(locale, &post_desc, blocking);
+  if (blocking) {
+  //// note: Do __NOT__ yield while waiting for the ack on a NB fork. We want to
+  //// ensure any subsequent NB tasks are spawned before we yield the processor.
+  //// For a case like `coforall loc in Locales do on loc do body()` this ensures
+  //// we've forked all remote tasks before we give up this task to potentially
+  //// work on the body for this locale.
+  post_fma_and_wait(locale, post_desc_p, blocking);
+  } else {
+  
+
+
+//  size_t currHandles = atomic_load_int_least32_t(&num_fork_post_handles);
+//
+//  if (currHandles >= 1) {
+//    chpl_comm_wait_nb_some(fork_post_handles, currHandles);
+//    //while (currHandles && !chpl_comm_try_nb_some(fork_post_handles, currHandles)) {
+//    //  currHandles = atomic_load_int_least32_t(&num_fork_post_handles);
+//    //}
+//    atomic_store_int_least32_t(&num_fork_post_handles, 0);
+//    currHandles = 0;
+//  }
+//
+//  nbdp->cdi = post_fma(locale, post_desc_p);
+//  fork_post_handles[currHandles] = nb_desc_idx_2_handle(nbdi);
+//  atomic_fetch_add_int_least32_t(&num_fork_post_handles, 1);
+
+  nbdp->cdi = post_fma(locale, post_desc_p);
+  fork_post_handles[num_fork_post_handles] = nb_desc_idx_2_handle(nbdi);
+  num_fork_post_handles++;
+
+  if (num_fork_post_handles >= NB_DESC_NUM_POOLS-1) {
+    chpl_comm_wait_nb_some(fork_post_handles, num_fork_post_handles);
+    num_fork_post_handles = 0;
+  }
+
+
+  //if (currHandles >= 1) {
+  //  // reached max in flight -- retire some to make room
+  //  while (!chpl_comm_try_nb_some(fork_post_handles, currHandles)) { }
+
+  //  // compress retired transactions out of the list
+  //  {
+  //    size_t iOut, iIn;
+
+  //    for (iOut = iIn = 0; iIn < currHandles; ) {
+  //      if (fork_post_handles[iIn] == NULL)
+  //        iIn++;
+  //      else
+  //        fork_post_handles[iOut++] = fork_post_handles[iIn++];
+  //    }
+
+  //    currHandles = iOut;
+  //  }
+  //}
+
+  //nbdp->cdi = post_fma(locale, post_desc_p);
+  //fork_post_handles[currHandles] = nb_desc_idx_2_handle(nbdi);
+
+  //if (fork_post_handles[currHandles] != NULL)
+  //  currHandles++;
+
+  //atomic_store_int_least32_t(&num_fork_post_handles, currHandles);
+
+  }
 
   if (blocking) {
     PERFSTATS_INC(wait_rfork_cnt);
