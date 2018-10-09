@@ -4526,6 +4526,7 @@ static
 void nb_desc_init(void)
 {
   //atomic_init_int_least32_t(&num_fork_post_handles, 0);
+  num_fork_post_handles = 0;
 
   // TODO asdf
   int i, j;
@@ -7449,38 +7450,34 @@ void do_fork_post(c_nodeid_t locale,
   fork_post_handles[num_fork_post_handles] = nb_desc_idx_2_handle(nbdi);
   num_fork_post_handles++;
 
+
   if (num_fork_post_handles >= NB_DESC_NUM_POOLS-1) {
-    chpl_comm_wait_nb_some(fork_post_handles, num_fork_post_handles);
-    num_fork_post_handles = 0;
+    // reached max in flight -- retire some to make room
+    while (!chpl_comm_try_nb_some(fork_post_handles, num_fork_post_handles)) { }
+
+    // compress retired transactions out of the list
+    {
+      size_t iOut, iIn;
+
+      for (iOut = iIn = 0; iIn < num_fork_post_handles; ) {
+        if (fork_post_handles[iIn] == NULL)
+          iIn++;
+        else
+          fork_post_handles[iOut++] = fork_post_handles[iIn++];
+      }
+
+      num_fork_post_handles = iOut;
+    }
   }
 
 
-  //if (currHandles >= 1) {
-  //  // reached max in flight -- retire some to make room
-  //  while (!chpl_comm_try_nb_some(fork_post_handles, currHandles)) { }
 
-  //  // compress retired transactions out of the list
-  //  {
-  //    size_t iOut, iIn;
-
-  //    for (iOut = iIn = 0; iIn < currHandles; ) {
-  //      if (fork_post_handles[iIn] == NULL)
-  //        iIn++;
-  //      else
-  //        fork_post_handles[iOut++] = fork_post_handles[iIn++];
-  //    }
-
-  //    currHandles = iOut;
-  //  }
+  //if (num_fork_post_handles >= NB_DESC_NUM_POOLS-1) {
+  //  chpl_comm_wait_nb_some(fork_post_handles, num_fork_post_handles);
+  //  num_fork_post_handles = 0;
   //}
 
-  //nbdp->cdi = post_fma(locale, post_desc_p);
-  //fork_post_handles[currHandles] = nb_desc_idx_2_handle(nbdi);
 
-  //if (fork_post_handles[currHandles] != NULL)
-  //  currHandles++;
-
-  //atomic_store_int_least32_t(&num_fork_post_handles, currHandles);
 
   }
 
