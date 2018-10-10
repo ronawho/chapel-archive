@@ -821,8 +821,8 @@ typedef struct {
   mpool_idx_base_t next;            // free list index
 } nb_desc_t;
 
-static chpl_comm_nb_handle_t fork_post_handles[NB_DESC_NUM_POOLS];
-static int num_fork_post_handles;
+static __thread chpl_comm_nb_handle_t fork_post_handles[NB_DESC_NUM_POOLS];
+static __thread int num_fork_post_handles = 0;
 
 static nb_desc_t nb_desc_pool[NB_DESC_NUM_POOLS][NB_DESC_NUM_PER_POOL];
 static mpool_idx_t nb_desc_pool_head[NB_DESC_NUM_POOLS];
