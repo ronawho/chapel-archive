@@ -443,7 +443,7 @@ void  chpl_comm_get_strd(void* dstaddr, size_t* dststrides, c_nodeid_t srcnode,
 void chpl_gen_comm_wide_string_get(void *addr, c_nodeid_t node, void *raddr,
                                    size_t size, int32_t typeIndex,
                                    int ln, int32_t fn);
-
+void wait_for_forks(void);
 //
 // Runs a function f on a remote locale, passing it
 // arg where size of arg is stored in arg_size.

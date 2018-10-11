@@ -7343,7 +7343,12 @@ void fork_shutdown(c_nodeid_t locale)
   do_fork_post(locale, false /*blocking*/, sizeof(req), &req.b, NULL, NULL);
 }
 
-
+void wait_for_forks(void) {
+  int old_num_forks = num_fork_post_handles;
+//  printf("waiting for %d forks\n", old_num_forks);
+  chpl_comm_wait_nb_some(fork_post_handles, num_fork_post_handles);
+  num_fork_post_handles -= old_num_forks;
+}
 
 static
 void do_fork_post(c_nodeid_t locale,
