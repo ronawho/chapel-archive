@@ -33,12 +33,17 @@ proc skipEndCountAll(val: bool) {
   }
 }
 
+extern proc skip_fma(b: bool);
 proc coforallOnTaskSpawn(trials) {
-  skipEndCountAll(true);
+  //skipEndCountAll(true);
+  skipEndCount=true;
+  skip_fma(true);
 
   for 1..numTrials do
     coforall locid in 1..numLocales-1 do on Locales[locid] {}
 
-  skipEndCountAll(false);
+  skip_fma(false);
+  skipEndCount=false;
+  //skipEndCountAll(false);
 }
 

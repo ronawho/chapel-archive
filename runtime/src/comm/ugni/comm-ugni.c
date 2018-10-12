@@ -7350,6 +7350,12 @@ void wait_for_forks(void) {
   num_fork_post_handles -= old_num_forks;
 }
 
+static chpl_bool do_skip_fma = false;
+
+void skip_fma(chpl_bool b) {
+  do_skip_fma = b;
+}
+
 static
 void do_fork_post(c_nodeid_t locale,
                   chpl_bool blocking,
@@ -7382,10 +7388,22 @@ void do_fork_post(c_nodeid_t locale,
   else
     p_rf_req->rf_done = NULL;
 
+  // Skip everything
+  //if (!blocking && do_skip_fma) {
+  //  return;
+  //}
+
   //
   // Fill in the POST descriptor.
   //
   acquire_comm_dom_and_req_buf(locale, &rbi);
+  // Time acquiring (and then releasing the req buf and comm domain), but skip
+  // everything else
+  //if (!blocking && do_skip_fma) {
+  //   *SEND_SIDE_FORK_REQ_FREE_ADDR(locale, cd_idx, rbi) = true;
+  //   release_comm_dom();
+  //  return;
+  //}
 
   nb_desc_idx_t          nbdi;
   nb_desc_t*             nbdp;
@@ -7451,7 +7469,15 @@ void do_fork_post(c_nodeid_t locale,
 //  fork_post_handles[currHandles] = nb_desc_idx_2_handle(nbdi);
 //  atomic_fetch_add_int_least32_t(&num_fork_post_handles, 1);
 
-  nbdp->cdi = post_fma(locale, post_desc_p);
+  // Only skip the actual gni post_fma call. Time everything else.
+  if (do_skip_fma) {
+   atomic_store_bool((atomic_bool*) (intptr_t) post_desc_p->post_id, true);
+   atomic_store_bool(&nbdp->done, true);
+   *SEND_SIDE_FORK_REQ_FREE_ADDR(locale, cd_idx, rbi) = true;
+   release_comm_dom();
+  } else {
+    nbdp->cdi = post_fma(locale, post_desc_p);
+  }
   fork_post_handles[num_fork_post_handles] = nb_desc_idx_2_handle(nbdi);
   num_fork_post_handles++;
 
