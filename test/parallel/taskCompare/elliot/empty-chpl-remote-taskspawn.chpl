@@ -25,8 +25,20 @@ proc main() {
 }
 
 
+
+proc skipEndCountAll(val: bool) {
+  skipEndCount = val;
+  coforall loc in Locales do on loc {
+    skipEndCount = val;
+  }
+}
+
 proc coforallOnTaskSpawn(trials) {
+  skipEndCountAll(true);
+
   for 1..numTrials do
-    coforall loc in Locales do on loc { }
+    coforall locid in 1..numLocales-1 do on Locales[locid] {}
+
+  skipEndCountAll(false);
 }
 

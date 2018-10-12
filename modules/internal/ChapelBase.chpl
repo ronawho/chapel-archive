@@ -941,6 +941,7 @@ module ChapelBase {
   inline proc _endCountFree(e: _EndCount) {
     delete _to_unmanaged(e);
   }
+  pragma "locale private" var skipEndCount = false;
 
   // This function is called by the initiating task once for each new
   // task *before* any of the tasks are started.  As above, no on
@@ -949,7 +950,9 @@ module ChapelBase {
   pragma "no remote memory fence"
   proc _upEndCount(e: _EndCount, param countRunningTasks=true) {
     if isAtomic(e.taskCnt) {
-      e.i.add(1, memory_order_release);
+      if !skipEndCount {
+        e.i.add(1, memory_order_release);
+      }
       e.taskCnt.add(1, memory_order_release);
     } else {
       // note that this on statement does not have the usual
@@ -957,7 +960,9 @@ module ChapelBase {
       // above. So we do an acquire fence before it.
       chpl_rmem_consist_fence(memory_order_release);
       on e {
-        e.i.add(1, memory_order_release);
+        if !skipEndCount {
+          e.i.add(1, memory_order_release);
+        }
         e.taskCnt += 1;
       }
     }
@@ -969,7 +974,10 @@ module ChapelBase {
   pragma "dont disable remote value forwarding"
   pragma "no remote memory fence"
   proc _upEndCount(e: _EndCount, param countRunningTasks=true, numTasks) {
-    e.i.add(numTasks:int, memory_order_release);
+
+    if !skipEndCount {
+      e.i.add(numTasks:int, memory_order_release);
+    }
 
     if countRunningTasks {
       here.runningTaskCntAdd(numTasks:int-1);  // decrement is in _waitEndCount()
@@ -986,8 +994,10 @@ module ChapelBase {
   proc _downEndCount(e: _EndCount, err: unmanaged Error) {
     // save the task error
     chpl_save_task_error(e, err);
-    // inform anybody waiting that we're done
-    e.i.sub(1, memory_order_release);
+    if !skipEndCount {
+      // inform anybody waiting that we're done
+      e.i.sub(1, memory_order_release);
+    }
   }
 
   // This function is called once by the initiating task.  As above, no
@@ -1004,8 +1014,10 @@ module ChapelBase {
     // See if we can help with any of the started tasks
     chpl_taskListExecute(e.taskList);
 
-    // Wait for all tasks to finish
-    e.i.waitFor(0, memory_order_acquire);
+    if !skipEndCount {
+      // Wait for all tasks to finish
+      e.i.waitFor(0, memory_order_acquire);
+    }
 
     if countRunningTasks {
       const taskDec = if isAtomic(e.taskCnt) then e.taskCnt.read() else e.taskCnt;
@@ -1028,8 +1040,10 @@ module ChapelBase {
     // See if we can help with any of the started tasks
     chpl_taskListExecute(e.taskList);
 
-    // Wait for all tasks to finish
-    e.i.waitFor(0, memory_order_acquire);
+    if !skipEndCount {
+      // Wait for all tasks to finish
+      e.i.waitFor(0, memory_order_acquire);
+    }
 
     if countRunningTasks {
       here.runningTaskCntSub(numTasks:int-1);
