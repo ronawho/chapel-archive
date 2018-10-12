@@ -1,7 +1,7 @@
 use Time;
 
-config const numTrials = 100;
-config const printTimings = false;
+config const numTrials = 500000;
+config const printTimings = true;
 
 enum TaskingMode {
   coforallOnT
@@ -33,17 +33,26 @@ proc skipEndCountAll(val: bool) {
   }
 }
 
-extern proc skip_fma(b: bool);
+config const noEndCount = false;
+config const skipFmaLevel = 0;
+
+extern proc skip_fma(val: c_int);
 proc coforallOnTaskSpawn(trials) {
-  //skipEndCountAll(true);
-  skipEndCount=true;
-  skip_fma(true);
+  if skipFmaLevel {
+    skipEndCount=true;
+    skip_fma(skipFmaLevel:c_int);
+  } else if noEndCount {
+    skipEndCountAll(true);
+  }
 
   for 1..numTrials do
     coforall locid in 1..numLocales-1 do on Locales[locid] {}
 
-  skip_fma(false);
-  skipEndCount=false;
-  //skipEndCountAll(false);
+  if skipFmaLevel {
+    skip_fma(0);
+    skipEndCount=false;
+  } else if noEndCount {
+    skipEndCountAll(false);
+  }
 }
 

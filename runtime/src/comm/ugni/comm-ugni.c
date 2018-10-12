@@ -7350,10 +7350,10 @@ void wait_for_forks(void) {
   num_fork_post_handles -= old_num_forks;
 }
 
-static chpl_bool do_skip_fma = false;
+static int do_skip_fma = 0;
 
-void skip_fma(chpl_bool b) {
-  do_skip_fma = b;
+void skip_fma(int val) {
+  do_skip_fma = val;
 }
 
 static
@@ -7388,22 +7388,21 @@ void do_fork_post(c_nodeid_t locale,
   else
     p_rf_req->rf_done = NULL;
 
-  // Skip everything
-  //if (!blocking && do_skip_fma) {
-  //  return;
-  //}
+  // TIME -- Skip everything
+  if (!blocking && do_skip_fma >= 5) {
+    return;
+  }
 
   //
   // Fill in the POST descriptor.
   //
   acquire_comm_dom_and_req_buf(locale, &rbi);
-  // Time acquiring (and then releasing the req buf and comm domain), but skip
-  // everything else
-  //if (!blocking && do_skip_fma) {
-  //   *SEND_SIDE_FORK_REQ_FREE_ADDR(locale, cd_idx, rbi) = true;
-  //   release_comm_dom();
-  //  return;
-  //}
+  // TIME -- Also time acquiring the req buf and comm domain
+  if (!blocking && do_skip_fma >= 4) {
+     *SEND_SIDE_FORK_REQ_FREE_ADDR(locale, cd_idx, rbi) = true;
+     release_comm_dom();
+    return;
+  }
 
   nb_desc_idx_t          nbdi;
   nb_desc_t*             nbdp;
@@ -7414,6 +7413,15 @@ void do_fork_post(c_nodeid_t locale,
     post_desc_p = &nbdp->post_desc;
     atomic_store_bool(&nbdp->done, false);
     post_desc_p->post_id         = (uint64_t) (intptr_t) &nbdp->done;
+  }
+
+  // TIME -- Also time acquiring the nb descriptor
+  if (!blocking && do_skip_fma >= 3) {
+    *SEND_SIDE_FORK_REQ_FREE_ADDR(locale, cd_idx, rbi) = true;
+    release_comm_dom();
+    atomic_store_bool(&nbdp->done, true);
+    nb_desc_free(nbdi);
+    return;
   }
 
   post_desc_p->type            = GNI_POST_FMA_PUT;
@@ -7434,6 +7442,16 @@ void do_fork_post(c_nodeid_t locale,
   GNI_CHECK(GNI_EpSetEventData(cd->remote_eps[locale], 0,
                                GNI_ENCODE_REM_INST_ID(chpl_nodeID, cd_idx,
                                                       rbi)));
+
+   // TIME -- Also time GNI_EpSetEventData
+   if (!blocking && do_skip_fma >= 2) {
+    *SEND_SIDE_FORK_REQ_FREE_ADDR(locale, cd_idx, rbi) = true;
+    release_comm_dom();
+    atomic_store_bool(&nbdp->done, true);
+    nb_desc_free(nbdi);
+    return;
+  }
+
   DBG_P_LPS(DBGF_RF, "post %s",
             locale, cd_idx, rbi, p_rf_req->seq,
             fork_op_name(p_rf_req->op));
@@ -7469,8 +7487,8 @@ void do_fork_post(c_nodeid_t locale,
 //  fork_post_handles[currHandles] = nb_desc_idx_2_handle(nbdi);
 //  atomic_fetch_add_int_least32_t(&num_fork_post_handles, 1);
 
-  // Only skip the actual gni post_fma call. Time everything else.
-  if (do_skip_fma) {
+  // TIME --  Only skip the actual gni post_fma call. Time everything else.
+  if (do_skip_fma >= 1) {
    atomic_store_bool((atomic_bool*) (intptr_t) post_desc_p->post_id, true);
    atomic_store_bool(&nbdp->done, true);
    *SEND_SIDE_FORK_REQ_FREE_ADDR(locale, cd_idx, rbi) = true;
