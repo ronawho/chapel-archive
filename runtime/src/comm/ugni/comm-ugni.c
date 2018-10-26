@@ -7018,6 +7018,31 @@ void chpl_comm_execute_on(c_nodeid_t locale, c_sublocid_t subloc,
 }
 
 static
+void do_fork_post_nb(c_nodeid_t locale, uint64_t f_size,
+                     fork_base_info_t* const p_rf_req)
+{
+  int rbi;
+  gni_post_descriptor_t post_desc;
+  p_rf_req->rf_done = NULL;
+
+  acquire_comm_dom_and_req_buf(locale, &rbi);
+
+  post_desc.type            = GNI_POST_FMA_PUT;
+  post_desc.cq_mode         = GNI_CQMODE_GLOBAL_EVENT | GNI_CQMODE_REMOTE_EVENT;
+  post_desc.dlvr_mode       = GNI_DLVMODE_PERFORMANCE;
+  post_desc.rdma_mode       = 0;
+  post_desc.src_cq_hndl     = 0;
+  post_desc.local_addr      = (uint64_t) (intptr_t) p_rf_req;
+  post_desc.remote_addr     = (uint64_t) (intptr_t) SEND_SIDE_FORK_REQ_BUF_ADDR(locale, cd_idx, rbi);
+  post_desc.remote_mem_hndl = rf_mdh_map[locale];
+  post_desc.length          = f_size;
+
+  GNI_CHECK(GNI_EpSetEventData(cd->remote_eps[locale], 0, GNI_ENCODE_REM_INST_ID(chpl_nodeID, cd_idx, rbi)));
+
+  post_fma_and_wait(locale, &post_desc, false);
+}
+
+static
 void fork_call_small_nb(c_nodeid_t locale, c_sublocid_t subloc,
                         chpl_fn_int_t fid, chpl_comm_on_bundle_t* arg,
                         size_t arg_size)
@@ -7027,11 +7052,9 @@ void fork_call_small_nb(c_nodeid_t locale, c_sublocid_t subloc,
   fork_base_info_t *req = NULL;
   fork_t f;
 
-  fork_base_info_t hdr = { .op           = fork_op_small_call,
-                           .caller       = chpl_nodeID,
-                           .rf_done      = NULL };
-
-  fork_small_call_info_t sc = { .b            = hdr,
+  fork_small_call_info_t sc = { .b            = { .op      = fork_op_small_call,
+                                                  .caller  = chpl_nodeID,
+                                                  .rf_done = NULL },
                                 .subloc       = subloc,
                                 .fast         = false,
                                 .blocking     = false,
@@ -7050,7 +7073,7 @@ void fork_call_small_nb(c_nodeid_t locale, c_sublocid_t subloc,
 
   req = &f_sc->b;
 
-  do_fork_post(locale, false, msg_size, req, NULL, NULL);
+  do_fork_post_nb(locale, msg_size, req);
 }
 
 
