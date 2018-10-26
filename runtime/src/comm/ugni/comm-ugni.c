@@ -7043,64 +7043,45 @@ void do_fork_post_nb(c_nodeid_t locale, uint64_t f_size,
 }
 
 static
-void fork_call_small_nb(c_nodeid_t locale, c_sublocid_t subloc,
-                        chpl_fn_int_t fid, chpl_comm_on_bundle_t* arg,
-                        size_t arg_size)
-{
-  size_t payload_size = arg_size - sizeof(chpl_comm_on_bundle_t);
-  size_t msg_size = payload_size + sizeof(fork_small_call_info_t);
-  fork_t f;
-
-  fork_small_call_info_t sc = { .b            = { .op      = fork_op_small_call,
-                                                  .caller  = chpl_nodeID,
-                                                  .rf_done = NULL },
-                                .subloc       = subloc,
-                                .fast         = false,
-                                .blocking     = false,
-                                .payload_size = payload_size,
-                                .fid          = fid,
-                                .state        = arg->task_bundle.state };
-
-  // Copy the header into the fork_t, and payload after it
-  f.sc = sc;
-  memcpy(&f.sc + 1, arg + 1, payload_size);
-
-  do_fork_post_nb(locale, msg_size, &f.sc.b);
-}
-
-
-static
 void fork_call_nb_buff(c_nodeid_t locale, c_sublocid_t subloc,
                       chpl_fn_int_t fid, chpl_comm_on_bundle_t* arg,
                       size_t arg_size, chpl_bool flush_only)
 {
   static __thread int vi = 0;
-  //static __thread atomic_bool lock;
 
   // thread local buffers for all arguments
   static __thread c_nodeid_t locale_v[MAX_CHAINED_FORK_LEN];
-  static __thread c_sublocid_t subloc_v[MAX_CHAINED_FORK_LEN];
-  static __thread chpl_fn_int_t fid_v[MAX_CHAINED_FORK_LEN];
-  static __thread chpl_comm_on_bundle_t arg_v[MAX_CHAINED_FORK_LEN][MAX_SMALL_CALL_PAYLOAD];
-  static __thread size_t arg_size_v[MAX_CHAINED_FORK_LEN];
-
-  // thread local init status (0=first-call, -1=out-of-entries, 1=have-entry)
-  //static __thread int init_status = 0;
-
+  static __thread fork_t fork_v[MAX_SMALL_CALL_PAYLOAD];
+  static __thread size_t msg_size_v[MAX_CHAINED_FORK_LEN];
 
   if (!flush_only) {
     locale_v[vi] = locale;
-    subloc_v[vi] = subloc;
-    fid_v[vi] = fid;
-    memcpy(arg_v[vi], arg, arg_size);
-    arg_size_v[vi] = arg_size;
+
+    size_t payload_size = arg_size - sizeof(chpl_comm_on_bundle_t);
+    size_t msg_size = payload_size + sizeof(fork_small_call_info_t);
+
+    fork_small_call_info_t sc = { .b            = { .op      = fork_op_small_call,
+                                                    .caller  = chpl_nodeID,
+                                                    .rf_done = NULL },
+                                  .subloc       = subloc,
+                                  .fast         = false,
+                                  .blocking     = false,
+                                  .payload_size = payload_size,
+                                  .fid          = fid,
+                                  .state        = arg->task_bundle.state };
+
+    // Copy the header into the fork_t, and payload after it
+    fork_v[vi].sc = sc;
+    memcpy(&fork_v[vi].sc + 1, arg + 1, payload_size);
+
+    msg_size_v[vi] = msg_size;
     vi++;
   }
 
   if (flush_only || vi == MAX_CHAINED_FORK_LEN) {
     int i;
     for (i=0; i<vi; i++) {
-      fork_call_small_nb(locale_v[i], subloc_v[i], fid_v[i], arg_v[i], arg_size_v[i]);
+      do_fork_post_nb(locale_v[i], msg_size_v[i], &fork_v[i].sc.b);
     }
     vi = 0;
   }
