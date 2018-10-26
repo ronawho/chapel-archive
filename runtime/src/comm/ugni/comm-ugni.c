@@ -7018,28 +7018,34 @@ void chpl_comm_execute_on(c_nodeid_t locale, c_sublocid_t subloc,
 }
 
 static
-void do_fork_post_nb(c_nodeid_t locale, uint64_t f_size,
-                     fork_base_info_t* const p_rf_req)
+void do_fork_post_buff(int v_len, c_nodeid_t *locale_v, uint64_t *f_size_v,
+                       fork_t* fork_v)
 {
-  int rbi;
-  gni_post_descriptor_t post_desc;
-  p_rf_req->rf_done = NULL;
+  for (int i=0; i<v_len; i++) {
+    c_nodeid_t locale = locale_v[i];
+    uint64_t f_size = f_size_v[i];
+    fork_base_info_t* p_rf_req = &fork_v[i].sc.b;
 
-  acquire_comm_dom_and_req_buf(locale, &rbi);
+    int rbi;
+    gni_post_descriptor_t post_desc;
+    p_rf_req->rf_done = NULL;
 
-  post_desc.type            = GNI_POST_FMA_PUT;
-  post_desc.cq_mode         = GNI_CQMODE_GLOBAL_EVENT | GNI_CQMODE_REMOTE_EVENT;
-  post_desc.dlvr_mode       = GNI_DLVMODE_PERFORMANCE;
-  post_desc.rdma_mode       = 0;
-  post_desc.src_cq_hndl     = 0;
-  post_desc.local_addr      = (uint64_t) (intptr_t) p_rf_req;
-  post_desc.remote_addr     = (uint64_t) (intptr_t) SEND_SIDE_FORK_REQ_BUF_ADDR(locale, cd_idx, rbi);
-  post_desc.remote_mem_hndl = rf_mdh_map[locale];
-  post_desc.length          = f_size;
+    acquire_comm_dom_and_req_buf(locale, &rbi);
 
-  GNI_CHECK(GNI_EpSetEventData(cd->remote_eps[locale], 0, GNI_ENCODE_REM_INST_ID(chpl_nodeID, cd_idx, rbi)));
+    post_desc.type            = GNI_POST_FMA_PUT;
+    post_desc.cq_mode         = GNI_CQMODE_GLOBAL_EVENT | GNI_CQMODE_REMOTE_EVENT;
+    post_desc.dlvr_mode       = GNI_DLVMODE_PERFORMANCE;
+    post_desc.rdma_mode       = 0;
+    post_desc.src_cq_hndl     = 0;
+    post_desc.local_addr      = (uint64_t) (intptr_t) p_rf_req;
+    post_desc.remote_addr     = (uint64_t) (intptr_t) SEND_SIDE_FORK_REQ_BUF_ADDR(locale, cd_idx, rbi);
+    post_desc.remote_mem_hndl = rf_mdh_map[locale];
+    post_desc.length          = f_size;
 
-  post_fma_and_wait(locale, &post_desc, false);
+    GNI_CHECK(GNI_EpSetEventData(cd->remote_eps[locale], 0, GNI_ENCODE_REM_INST_ID(chpl_nodeID, cd_idx, rbi)));
+
+    post_fma_and_wait(locale, &post_desc, false);
+  }
 }
 
 static
@@ -7080,9 +7086,7 @@ void fork_call_nb_buff(c_nodeid_t locale, c_sublocid_t subloc,
 
   if (flush_only || vi == MAX_CHAINED_FORK_LEN) {
     int i;
-    for (i=0; i<vi; i++) {
-      do_fork_post_nb(locale_v[i], msg_size_v[i], &fork_v[i].sc.b);
-    }
+    do_fork_post_buff(vi, locale_v, msg_size_v, fork_v);
     vi = 0;
   }
 }
