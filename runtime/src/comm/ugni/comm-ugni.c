@@ -7049,7 +7049,6 @@ void fork_call_small_nb(c_nodeid_t locale, c_sublocid_t subloc,
 {
   size_t payload_size = arg_size - sizeof(chpl_comm_on_bundle_t);
   size_t msg_size = payload_size + sizeof(fork_small_call_info_t);
-  fork_base_info_t *req = NULL;
   fork_t f;
 
   fork_small_call_info_t sc = { .b            = { .op      = fork_op_small_call,
@@ -7062,18 +7061,11 @@ void fork_call_small_nb(c_nodeid_t locale, c_sublocid_t subloc,
                                 .fid          = fid,
                                 .state        = arg->task_bundle.state };
 
-  fork_small_call_info_t *f_sc = &f.sc;
-
-  // Copy the header into the fork_t
+  // Copy the header into the fork_t, and payload after it
   f.sc = sc;
-  // Now copy the payload after it
-  // Note ptr+1 here is the same as (unsigned char*)ptr + sizeof(*ptr)
-  // and it refers to the memory just after that structure.
-  memcpy(f_sc + 1, arg + 1, payload_size);
+  memcpy(&f.sc + 1, arg + 1, payload_size);
 
-  req = &f_sc->b;
-
-  do_fork_post_nb(locale, msg_size, req);
+  do_fork_post_nb(locale, msg_size, &f.sc.b);
 }
 
 
