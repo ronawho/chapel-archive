@@ -7021,16 +7021,23 @@ static
 void do_fork_post_buff(int v_len, c_nodeid_t *locale_v, uint64_t *f_size_v,
                        fork_t* fork_v)
 {
+
+  acquire_comm_dom();
+  cd->firmly_bound = true;
+
   for (int i=0; i<v_len; i++) {
     c_nodeid_t locale = locale_v[i];
     uint64_t f_size = f_size_v[i];
     fork_base_info_t* p_rf_req = &fork_v[i].sc.b;
 
-    int rbi;
     gni_post_descriptor_t post_desc;
     p_rf_req->rf_done = NULL;
 
-    acquire_comm_dom_and_req_buf(locale, &rbi);
+    // Force acquire the request buffer for the current cd. TODO this is NOT
+    // safe for real programs
+    int rbi = 0;
+    *SEND_SIDE_FORK_REQ_FREE_ADDR(locale, cd_idx, rbi) = false;
+    //acquire_comm_dom_and_req_buf(locale, &rbi);
 
     post_desc.type            = GNI_POST_FMA_PUT;
     post_desc.cq_mode         = GNI_CQMODE_GLOBAL_EVENT | GNI_CQMODE_REMOTE_EVENT;
@@ -7046,6 +7053,9 @@ void do_fork_post_buff(int v_len, c_nodeid_t *locale_v, uint64_t *f_size_v,
 
     post_fma_and_wait(locale, &post_desc, false);
   }
+
+  cd->firmly_bound = false;
+  release_comm_dom();
 }
 
 static
