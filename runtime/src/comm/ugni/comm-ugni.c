@@ -7017,6 +7017,42 @@ void chpl_comm_execute_on(c_nodeid_t locale, c_sublocid_t subloc,
   fork_call_common(locale, subloc, fid, arg, arg_size, false, true);
 }
 
+static
+void fork_call_small_nb(c_nodeid_t locale, c_sublocid_t subloc,
+                        chpl_fn_int_t fid, chpl_comm_on_bundle_t* arg,
+                        size_t arg_size)
+{
+  size_t payload_size = arg_size - sizeof(chpl_comm_on_bundle_t);
+  size_t msg_size = payload_size + sizeof(fork_small_call_info_t);
+  fork_base_info_t *req = NULL;
+  fork_t f;
+
+  fork_base_info_t hdr = { .op           = fork_op_small_call,
+                           .caller       = chpl_nodeID,
+                           .rf_done      = NULL };
+
+  fork_small_call_info_t sc = { .b            = hdr,
+                                .subloc       = subloc,
+                                .fast         = false,
+                                .blocking     = false,
+                                .payload_size = payload_size,
+                                .fid          = fid,
+                                .state        = arg->task_bundle.state };
+
+  fork_small_call_info_t *f_sc = &f.sc;
+
+  // Copy the header into the fork_t
+  f.sc = sc;
+  // Now copy the payload after it
+  // Note ptr+1 here is the same as (unsigned char*)ptr + sizeof(*ptr)
+  // and it refers to the memory just after that structure.
+  memcpy(f_sc + 1, arg + 1, payload_size);
+
+  req = &f_sc->b;
+
+  do_fork_post(locale, false, msg_size, req, NULL, NULL);
+}
+
 
 static
 void fork_call_nb_buff(c_nodeid_t locale, c_sublocid_t subloc,
@@ -7049,7 +7085,7 @@ void fork_call_nb_buff(c_nodeid_t locale, c_sublocid_t subloc,
   if (flush_only || vi == MAX_CHAINED_FORK_LEN) {
     int i;
     for (i=0; i<vi; i++) {
-      fork_call_common(locale_v[i], subloc_v[i], fid_v[i], arg_v[i], arg_size_v[i], false, false);
+      fork_call_small_nb(locale_v[i], subloc_v[i], fid_v[i], arg_v[i], arg_size_v[i]);
     }
     vi = 0;
   }
