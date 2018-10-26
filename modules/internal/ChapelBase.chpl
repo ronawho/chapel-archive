@@ -1038,6 +1038,8 @@ module ChapelBase {
   pragma "unchecked throws"
   proc _waitEndCount(e: _EndCount, param countRunningTasks=true, numTasks) throws {
     // See if we can help with any of the started tasks
+    extern proc wait_for_forks();
+    wait_for_forks();
     chpl_taskListExecute(e.taskList);
 
     if !skipEndCount {

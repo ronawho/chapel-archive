@@ -777,6 +777,7 @@ static size_t rdma_threshold = DEFAULT_RDMA_THRESHOLD;
 //
 #define MAX_CHAINED_PUT_LEN 64
 #define MAX_CHAINED_AMO_LEN 64
+#define MAX_CHAINED_FORK_LEN 64
 
 
 //
@@ -7017,6 +7018,43 @@ void chpl_comm_execute_on(c_nodeid_t locale, c_sublocid_t subloc,
 }
 
 
+static
+void fork_call_nb_buff(c_nodeid_t locale, c_sublocid_t subloc,
+                      chpl_fn_int_t fid, chpl_comm_on_bundle_t* arg,
+                      size_t arg_size, chpl_bool flush_only)
+{
+  static __thread int vi = 0;
+  //static __thread atomic_bool lock;
+
+  // thread local buffers for all arguments
+  static __thread c_nodeid_t locale_v[MAX_CHAINED_FORK_LEN];
+  static __thread c_sublocid_t subloc_v[MAX_CHAINED_FORK_LEN];
+  static __thread chpl_fn_int_t fid_v[MAX_CHAINED_FORK_LEN];
+  static __thread chpl_comm_on_bundle_t arg_v[MAX_CHAINED_FORK_LEN][MAX_SMALL_CALL_PAYLOAD];
+  static __thread size_t arg_size_v[MAX_CHAINED_FORK_LEN];
+
+  // thread local init status (0=first-call, -1=out-of-entries, 1=have-entry)
+  //static __thread int init_status = 0;
+
+
+  if (!flush_only) {
+    locale_v[vi] = locale;
+    subloc_v[vi] = subloc;
+    fid_v[vi] = fid;
+    memcpy(arg_v[vi], arg, arg_size);
+    arg_size_v[vi] = arg_size;
+    vi++;
+  }
+
+  if (flush_only || vi == MAX_CHAINED_FORK_LEN) {
+    int i;
+    for (i=0; i<vi; i++) {
+      fork_call_common(locale_v[i], subloc_v[i], fid_v[i], arg_v[i], arg_size_v[i], false, false);
+    }
+    vi = 0;
+  }
+}
+
 void chpl_comm_execute_on_nb(c_nodeid_t locale, c_sublocid_t subloc,
                              chpl_fn_int_t fid,
                              chpl_comm_on_bundle_t* arg, size_t arg_size)
@@ -7040,7 +7078,11 @@ void chpl_comm_execute_on_nb(c_nodeid_t locale, c_sublocid_t subloc,
   chpl_comm_diags_incr(execute_on_nb);
 
   PERFSTATS_INC(fork_call_nb_cnt);
-  fork_call_common(locale, subloc, fid, arg, arg_size, false, false);
+  if (arg_size < MAX_SMALL_CALL_PAYLOAD) {
+    fork_call_nb_buff(locale, subloc, fid, arg, arg_size, false);
+  } else {
+    fork_call_common(locale, subloc, fid, arg, arg_size, false, false);
+  }
 }
 
 
@@ -7348,6 +7390,9 @@ void wait_for_forks(void) {
 //  printf("waiting for %d forks\n", old_num_forks);
   chpl_comm_wait_nb_some(fork_post_handles, num_fork_post_handles);
   num_fork_post_handles -= old_num_forks;
+
+  // flush, but bogus/unused args otherwise
+  fork_call_nb_buff(chpl_nodeID, c_sublocid_any, 0, NULL, 0, true);
 }
 
 static int do_skip_fma = 0;
