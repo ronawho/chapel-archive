@@ -2,6 +2,7 @@ use Time;
 
 config const numTrials = 500000;
 config const printTimings = true;
+config const verify = false;
 
 enum TaskingMode {
   coforallOnT
@@ -33,6 +34,11 @@ proc skipEndCountAll(val: bool) {
   }
 }
 
+pragma "locale private" var counter = 0;
+inline proc incCounter() { counter += 1; }
+inline proc getCounter() { return counter; }
+var counters:[1..numLocales-1] int;
+
 config const noEndCount = false;
 config const skipFmaLevel = 0;
 
@@ -46,7 +52,7 @@ proc coforallOnTaskSpawn(trials) {
   }
 
   for 1..numTrials do
-    coforall locid in 1..numLocales-1 do on Locales[locid] {}
+    coforall locid in 1..numLocales-1 do on Locales[locid] { incCounter(); }
 
   if skipFmaLevel {
     skip_fma(0);
@@ -54,5 +60,11 @@ proc coforallOnTaskSpawn(trials) {
   } else if noEndCount {
     skipEndCountAll(false);
   }
+
+  coforall locid in 1..numLocales-1 do on Locales[locid] do
+    counters[locid] = getCounter();
+  if verify then
+    assert(+reduce counters == numLocales-1*numTrials);
+  writeln(counters);
 }
 
