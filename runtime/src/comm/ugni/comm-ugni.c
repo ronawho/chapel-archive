@@ -7067,7 +7067,7 @@ void fork_call_nb_buff(c_nodeid_t locale, c_sublocid_t subloc,
 
   // thread local buffers for all arguments
   static __thread c_nodeid_t locale_v[MAX_CHAINED_FORK_LEN];
-  static __thread fork_t fork_v[MAX_SMALL_CALL_PAYLOAD];
+  static __thread fork_t fork_v[MAX_CHAINED_FORK_LEN];
   static __thread size_t msg_size_v[MAX_CHAINED_FORK_LEN];
 
   if (!flush_only) {
@@ -7094,7 +7094,7 @@ void fork_call_nb_buff(c_nodeid_t locale, c_sublocid_t subloc,
     vi++;
   }
 
-  if (flush_only || vi == MAX_CHAINED_FORK_LEN) {
+  if (flush_only && vi > 0 || vi == MAX_CHAINED_FORK_LEN) {
     int i;
     do_fork_post_buff(vi, locale_v, msg_size_v, fork_v);
     vi = 0;
