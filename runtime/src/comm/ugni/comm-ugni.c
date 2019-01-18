@@ -1517,6 +1517,9 @@ static void      do_nic_amo(void*, void*, c_nodeid_t, void*, size_t,
                             gni_fma_cmd_type_t, void*, mem_region_t*);
 static void      do_nic_amo_nf(void*, c_nodeid_t, void*, size_t,
                                gni_fma_cmd_type_t, mem_region_t*);
+static int       do_nic_amo_nf_nb(void*, c_nodeid_t, void*, size_t,
+                                  gni_fma_cmd_type_t, mem_region_t*,
+                                  atomic_bool*, gni_post_descriptor_t*);
 static void      buff_amo_init(void);
 static void      buff_get_init(void);
 static void      do_nic_amo_nf_buff(void*, c_nodeid_t, void*, size_t,
@@ -1538,6 +1541,9 @@ static void      acquire_comm_dom(void);
 static void      acquire_comm_dom_and_req_buf(c_nodeid_t, int*);
 static void      release_comm_dom(void);
 static chpl_bool reacquire_comm_dom(int);
+static void      setup_post_done(atomic_bool*, gni_post_descriptor_t*);
+static void      wait_for_trans(atomic_bool*, int, chpl_bool);
+static void      wait_for_all_trans(atomic_bool*, int*, int);
 static int       post_fma(c_nodeid_t, gni_post_descriptor_t*);
 static void      post_fma_and_wait(c_nodeid_t, gni_post_descriptor_t*,
                                    chpl_bool);
@@ -6890,50 +6896,6 @@ void buff_amo_init(void) {
 }
 
 
-#if !HAVE_GNI_FMA_CHAIN_TRANSACTIONS
-
-static
-void do_remote_amo_nb(int v_len, uint64_t* opnd1_v, c_nodeid_t* locale_v,
-                      void** object_v, size_t* size_v,
-                      gni_fma_cmd_type_t* cmd_v, mem_region_t** remote_mr_v) {
-
-  gni_post_descriptor_t post_desc_v[MAX_CHAINED_AMO_LEN];
-  atomic_bool post_done_v[MAX_CHAINED_AMO_LEN];
-  int cdi_v[MAX_CHAINED_AMO_LEN];
-  int vi;
-
-  for (vi=0; vi<v_len; vi++) {
-    // build up the post descriptor
-    post_desc_v[vi].type            = GNI_POST_AMO;
-    post_desc_v[vi].cq_mode         = GNI_CQMODE_GLOBAL_EVENT;
-    post_desc_v[vi].dlvr_mode       = GNI_DLVMODE_PERFORMANCE;
-    post_desc_v[vi].rdma_mode       = 0;
-    post_desc_v[vi].src_cq_hndl     = 0;
-    post_desc_v[vi].remote_addr     = (uint64_t) (intptr_t) object_v[vi];
-    post_desc_v[vi].remote_mem_hndl = remote_mr_v[vi]->mdh;
-    post_desc_v[vi].length          = size_v[vi];
-    post_desc_v[vi].amo_cmd         = cmd_v[vi];
-    post_desc_v[vi].first_operand   = opnd1_v[vi];
-
-    atomic_init_bool(&post_done_v[vi], false);
-    post_desc_v[vi].post_id = (uint64_t) (intptr_t) &post_done_v[vi];
-
-    // initiate the transaction
-    cdi_v[vi] = post_fma(locale_v[vi], &post_desc_v[vi]);
-  }
-
-  // Wait for all the transactions to complete
-  for (vi=0; vi<v_len; vi++) {
-    consume_all_outstanding_cq_events(cdi_v[vi]);
-    while (!atomic_load_explicit_bool(&post_done_v[vi], memory_order_acquire)) {
-      local_yield();
-      consume_all_outstanding_cq_events(cdi_v[vi]);
-    }
-  }
-}
-
-#endif // HAVE_GNI_FMA_CHAIN_TRANSACTIONS
-
 static
 void do_remote_amo_V(int v_len, uint64_t* opnd1_v, c_nodeid_t* locale_v,
                      void** object_v, size_t* size_v,
@@ -6985,34 +6947,30 @@ void do_remote_amo_V(int v_len, uint64_t* opnd1_v, c_nodeid_t* locale_v,
   post_fma_ct_and_wait(locale_v, &post_desc);
 
 #else // HAVE_GNI_FMA_CHAIN_TRANSACTIONS
-
-  //
-  // This GNI is too old to support chained transactions. Just do
-  // non-blocking operations instead
-  //
+  gni_post_descriptor_t post_desc_v[MAX_CHAINED_AMO_LEN];
+  atomic_bool post_done_v[MAX_CHAINED_AMO_LEN];
+  int cdi_v[MAX_CHAINED_AMO_LEN];
 
   cq_cnt_t free_cq;
+  cq_cnt_t used_cq = 0;
 
-  // acquire a cd and mark it as firmly bound so it's not released
   acquire_comm_dom();
   cd->firmly_bound = true;
 
-  // calculate how many free cq entries there are and block up the work into
-  // chunks so that we won't run out of cq entries.
   free_cq = cd->cq_cnt_max - CQ_CNT_LOAD(cd);
-  while (v_len > free_cq) {
-    do_remote_amo_nb(free_cq, opnd1_v, locale_v, object_v, size_v, cmd_v, remote_mr_v);
-    v_len       -= free_cq;
-    opnd1_v     += free_cq;
-    locale_v    += free_cq;
-    object_v    += free_cq;
-    size_v      += free_cq;
-    cmd_v       += free_cq;
-    remote_mr_v += free_cq;
-  }
-  do_remote_amo_nb(v_len, opnd1_v, locale_v, object_v, size_v, cmd_v, remote_mr_v);
 
-  // release the cd
+  for (int vi = 0; vi < v_len; vi++) {
+    cdi_v[used_cq] = do_nic_amo_nf_nb(&opnd1_v[vi], locale_v[vi], object_v[vi],
+                                      size_v[vi], cmd_v[vi], remote_mr_v[vi],
+                                      &post_done_v[used_cq], &post_desc_v[used_cq]);
+    used_cq++;
+    if (used_cq >= free_cq) {
+      wait_for_all_trans(post_done_v, cdi_v, used_cq);
+      used_cq = 0;
+    }
+  }
+  wait_for_all_trans(post_done_v, cdi_v, used_cq);
+
   cd->firmly_bound = false;
   release_comm_dom();
 
@@ -7134,35 +7092,48 @@ void do_nic_amo_nf_buff(void* opnd1, c_nodeid_t locale,
 
 static
 inline
+int do_nic_amo_nf_nb(void* opnd1, c_nodeid_t locale,
+                     void* object, size_t size, gni_fma_cmd_type_t cmd,
+                     mem_region_t* remote_mr, atomic_bool* post_done,
+                     gni_post_descriptor_t* post_desc)
+{
+  check_nic_amo(size, object, remote_mr);
+
+  //
+  // Fill in the POST descriptor.
+  //
+  post_desc->type            = GNI_POST_AMO;
+  post_desc->cq_mode         = GNI_CQMODE_GLOBAL_EVENT;
+  post_desc->dlvr_mode       = GNI_DLVMODE_PERFORMANCE;
+  post_desc->rdma_mode       = 0;
+  post_desc->src_cq_hndl     = 0;
+  post_desc->remote_addr     = (uint64_t) (intptr_t) object;
+  post_desc->remote_mem_hndl = remote_mr->mdh;
+  post_desc->length          = size;
+  post_desc->amo_cmd         = cmd;
+  post_desc->first_operand   = size == 4 ? *(uint32_t*) opnd1:
+                                           *(uint64_t*) opnd1;
+
+  setup_post_done(post_done, post_desc);
+  return post_fma(locale, post_desc);
+}
+
+static
+inline
 void do_nic_amo_nf(void* opnd1, c_nodeid_t locale,
                    void* object, size_t size,
                    gni_fma_cmd_type_t cmd,
                    mem_region_t* remote_mr)
 {
-  gni_post_descriptor_t post_desc;
-
-  check_nic_amo(size, object, remote_mr);
   PERFSTATS_INC(amo_cnt);
 
-  //
-  // Fill in the POST descriptor.
-  //
-  post_desc.type            = GNI_POST_AMO;
-  post_desc.cq_mode         = GNI_CQMODE_GLOBAL_EVENT;
-  post_desc.dlvr_mode       = GNI_DLVMODE_PERFORMANCE;
-  post_desc.rdma_mode       = 0;
-  post_desc.src_cq_hndl     = 0;
-  post_desc.remote_addr     = (uint64_t) (intptr_t) object;
-  post_desc.remote_mem_hndl = remote_mr->mdh;
-  post_desc.length          = size;
-  post_desc.amo_cmd         = cmd;
-  post_desc.first_operand   = size == 4 ? *(uint32_t*) opnd1:
-                                          *(uint64_t*) opnd1;
+  gni_post_descriptor_t post_desc;
+  atomic_bool post_done;
+  int cdi;
 
-  //
-  // Initiate the transaction and wait for it to complete.
-  //
-  post_fma_and_wait(locale, &post_desc, true);
+  cdi = do_nic_amo_nf_nb(opnd1, locale, object, size, cmd, remote_mr, &post_done, &post_desc);
+
+  wait_for_trans(&post_done, cdi, true);
 }
 
 
@@ -8059,32 +8030,45 @@ int post_fma(c_nodeid_t locale, gni_post_descriptor_t* post_desc)
 
 
 static
-void post_fma_and_wait(c_nodeid_t locale, gni_post_descriptor_t* post_desc,
-                       chpl_bool do_yield)
-{
-  int cdi;
-  atomic_bool post_done;
-  uint64_t iters = 0;
+void setup_post_done(atomic_bool* post_done, gni_post_descriptor_t* post_desc) {
+  atomic_init_bool(post_done, false);
+  post_desc->post_id = (uint64_t) (intptr_t) post_done;
+}
 
-  atomic_init_bool(&post_done, false);
-  post_desc->post_id = (uint64_t) (intptr_t) &post_done;
-
-  cdi = post_fma(locale, post_desc);
-
-  //
-  // Wait for the transaction to complete.  Yield initially; the
-  // minimum round-trip time on the network isn't small and maybe
-  // we can find something else to do in the meantime.  FMA is only
-  // used for small transactions which will be relatively fast, so
-  // after the initial yield, only yield every 64 attempts.
-  //
+static
+void wait_for_trans(atomic_bool* post_done, int cdi, chpl_bool do_yield) {
+  int iters = 0;
   do {
     if (do_yield && (iters & 0x3F) == 0) {
       local_yield();
     }
     consume_all_outstanding_cq_events(cdi);
     iters++;
-  } while (!atomic_load_explicit_bool(&post_done, memory_order_acquire));
+  } while (!atomic_load_explicit_bool(post_done, memory_order_acquire));
+}
+
+static
+void wait_for_all_trans(atomic_bool* post_done_v, int* cdi_v, int v_len) {
+  int vi;
+  for (vi=0; vi<v_len; vi++) {
+    consume_all_outstanding_cq_events(cdi_v[vi]);
+    while (!atomic_load_explicit_bool(&post_done_v[vi], memory_order_acquire)) {
+      local_yield();
+      consume_all_outstanding_cq_events(cdi_v[vi]);
+    }
+  }
+}
+
+static
+void post_fma_and_wait(c_nodeid_t locale, gni_post_descriptor_t* post_desc,
+                       chpl_bool do_yield)
+{
+  int cdi;
+  atomic_bool post_done;
+
+  setup_post_done(&post_done, post_desc);
+  cdi = post_fma(locale, post_desc);
+  wait_for_trans(&post_done, cdi, do_yield);
 }
 
 #if HAVE_GNI_FMA_CHAIN_TRANSACTIONS
