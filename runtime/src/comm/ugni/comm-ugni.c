@@ -853,6 +853,31 @@ static gni_cq_handle_t rf_cqh;          // completion queue handle
 static gni_mem_handle_t  rf_mdh;        // remote fork req space GNI mem handle
 static gni_mem_handle_t* rf_mdh_map;    // all locales' remote fork space mdhs
 
+
+static void      local_yield(void);
+// Simple wrapper for spinlock with more relaxed orderings and proper yielding
+// for locks. Should only be used when contention is expected to be very low.
+typedef atomic_bool spinlock;
+typedef atomic_bool aligned_spinlock CACHE_LINE_ALIGN;
+static inline void spinlock_init(spinlock* s) {
+  atomic_init_bool(s, false);
+}
+static inline void spinlock_lock(spinlock* s) {
+  while (atomic_exchange_explicit_bool(s, true, memory_order_acquire)) {
+    local_yield();
+  }
+}
+static inline chpl_bool spinlock_trylock(spinlock* s) {
+  return atomic_exchange_explicit_bool(s, true, memory_order_acquire);
+}
+
+static inline void spinlock_unlock(spinlock* s) {
+  atomic_store_explicit_bool(s, false, memory_order_release);
+}
+static inline void spinlock_destroy(spinlock* s) {
+  atomic_destroy_bool(s);
+}
+
 //
 // Blocking remote forks need a "remote fork done" (rf_done) flag, for
 // the remote side to set when it completes.  Such flags have to be in
@@ -875,14 +900,15 @@ static gni_mem_handle_t* rf_mdh_map;    // all locales' remote fork space mdhs
 #define RF_DONE_NUM_PER_THREAD 1024
 
 typedef int64_t rf_done_t;
+typedef rf_done_t aligned_rf_done_t CACHE_LINE_ALIGN;
 
 static int rf_done_num;
-static rf_done_t* rf_done_pool;
+static aligned_rf_done_t* rf_done_pool;
 static __thread int rf_done_private_prt;
 static __thread int rf_done_prt_lo = -1;
 static __thread int rf_done_prt_hi = -1;
 
-static atomic_bool* rf_done_pool_lock;
+static aligned_spinlock* rf_done_pool_lock;
 
 
 //
@@ -1471,8 +1497,7 @@ static void      fork_amo_wrapper(fork_amo_info_t*);
 static void      release_req_buf(uint32_t, int, int);
 static void      indicate_done(fork_base_info_t* b);
 static void      indicate_done2(int, rf_done_t *);
-static void      send_polling_response(void*, c_nodeid_t, void*, size_t,
-                                       mem_region_t*);
+static void      send_polling_response(void*, c_nodeid_t, void*, size_t);
 static nb_desc_idx_t nb_desc_idx_encode(int, int);
 static void      nb_desc_idx_decode(int*, int*, nb_desc_idx_t);
 static nb_desc_t* nb_desc_idx_2_ptr(nb_desc_idx_t);
@@ -1550,7 +1575,6 @@ static int       post_rdma(c_nodeid_t, gni_post_descriptor_t*);
 static void      post_rdma_and_wait(c_nodeid_t, gni_post_descriptor_t*,
                                     chpl_bool);
 static chpl_bool can_task_yield(void);
-static void      local_yield(void);
 
 
 //
@@ -1775,23 +1799,6 @@ static void dbg_catf(FILE* out_f, const char* in_fname, const char* match)
 
 
 
-// Simple wrapper for spinlock with more relaxed orderings and proper yielding
-// for locks. Should only be used when contention is expected to be very low.
-typedef atomic_bool spinlock;
-static inline void spinlock_init(spinlock* s) {
-  atomic_init_bool(s, false);
-}
-static inline void spinlock_lock(spinlock* s) {
-  while (atomic_exchange_explicit_bool(s, true, memory_order_acquire)) {
-    local_yield();
-  }
-}
-static inline void spinlock_unlock(spinlock* s) {
-  atomic_store_explicit_bool(s, false, memory_order_release);
-}
-static inline void spinlock_destroy(spinlock* s) {
-  atomic_destroy_bool(s);
-}
 
 
 // Simple wrapper for a pthread reader/writer lock with proper yielding for
@@ -4414,7 +4421,7 @@ void release_req_buf(uint32_t li, int cdi, int rbi)
   static chpl_bool32 free_flag = true;
   send_polling_response(&free_flag, li,
                         RECV_SIDE_FORK_REQ_FREE_ADDR(li, cdi, rbi),
-                        sizeof(free_flag), &gnr_mreg_map[li]);
+                        sizeof(free_flag));
 }
 
 
@@ -4431,13 +4438,13 @@ inline
 void indicate_done2(int caller, rf_done_t *ack)
 {
   static rf_done_t done = 1;
-  send_polling_response(&done, caller, ack, sizeof(done), NULL);
+  send_polling_response(&done, caller, ack, sizeof(done));
 }
 
 
 static
 void send_polling_response(void* src_addr, c_nodeid_t locale, void* tgt_addr,
-                           size_t size, mem_region_t* mr)
+                           size_t size)
 {
   gni_post_descriptor_t* post_desc;
 
@@ -4449,7 +4456,8 @@ void send_polling_response(void* src_addr, c_nodeid_t locale, void* tgt_addr,
   // while avoiding concurrency control entirely.
   //
   if (cd == NULL || !cd->firmly_bound) {
-    do_remote_put(src_addr, locale, tgt_addr, size, mr, may_proxy_false);
+    do_remote_put(src_addr, locale, tgt_addr, size, &gnr_mreg_map[locale],
+                  may_proxy_false);
     return;
   }
 
@@ -4501,12 +4509,6 @@ void send_polling_response(void* src_addr, c_nodeid_t locale, void* tgt_addr,
   //
   // Fill in the POST descriptor.
   //
-  if (mr == NULL
-      && (mr = mreg_for_remote_addr(tgt_addr, locale)) == NULL) {
-    CHPL_INTERNAL_ERROR("send_polling_response(): "
-                        "remote address is not NIC-registered");
-  }
-
   post_desc->type            = GNI_POST_FMA_PUT;
   post_desc->cq_mode         = GNI_CQMODE_GLOBAL_EVENT;
   post_desc->dlvr_mode       = GNI_DLVMODE_PERFORMANCE;
@@ -4514,7 +4516,7 @@ void send_polling_response(void* src_addr, c_nodeid_t locale, void* tgt_addr,
   post_desc->src_cq_hndl     = 0;
   post_desc->local_addr      = (uint64_t) (intptr_t) src_addr;
   post_desc->remote_addr     = (uint64_t) (intptr_t) tgt_addr;
-  post_desc->remote_mem_hndl = mr->mdh;
+  post_desc->remote_mem_hndl = gnr_mreg_map[locale].mdh;
   post_desc->length          = size;
 
   //
@@ -4683,7 +4685,7 @@ void rf_done_init(void)
                  0, 0);
 
   // Must be directly communicable without proxy.
-  rf_done_pool = (rf_done_t*)
+  rf_done_pool = (aligned_rf_done_t*)
                  chpl_comm_mem_reg_allocMany(rf_done_num,
                                              sizeof(rf_done_pool[0]),
                                              CHPL_RT_MD_COMM_PER_LOC_INFO,
@@ -4703,13 +4705,13 @@ void rf_done_init_locks(void)
 {
   const int num_locks = rf_done_prt_hi - rf_done_prt_lo;
 
-  rf_done_pool_lock = ((atomic_bool*)
+  rf_done_pool_lock = ((aligned_spinlock*)
                        chpl_mem_allocMany(num_locks,
                                           sizeof(rf_done_pool_lock[0]),
                                           CHPL_RT_MD_COMM_PER_LOC_INFO,
                                           0, 0));
   for (int i = 0; i < num_locks; i++) {
-    atomic_init_bool(&rf_done_pool_lock[i], false);
+    spinlock_init(&rf_done_pool_lock[i]);
   }
 }
 
@@ -4764,13 +4766,12 @@ rf_done_t* rf_done_alloc(void)
         if (i == last_i)
           CHPL_INTERNAL_ERROR("rf_done_pool empty");
       }
-    } while (atomic_exchange_bool(&rf_done_pool_lock[i - rf_done_prt_lo],
-                                  true));
+    } while (spinlock_trylock(&rf_done_pool_lock[i - rf_done_prt_lo]));
   }
 
   last_i = i;
 
-  return &rf_done_pool[i];
+  return (rf_done_t*)&rf_done_pool[i];
 }
 
 
@@ -4782,7 +4783,7 @@ void rf_done_free(rf_done_t* rf_done_p)
   if (rf_done_private_prt)
     rf_done_pool[i] = -1;
   else
-    atomic_store_bool(&rf_done_pool_lock[i - rf_done_prt_lo], false);
+    spinlock_unlock(&rf_done_pool_lock[i - rf_done_prt_lo]);
 }
 
 
@@ -7732,7 +7733,6 @@ void do_fork_post(c_nodeid_t locale,
                   uint64_t f_size, fork_base_info_t* const p_rf_req,
                   int* cdi_p, int* rbi_p)
 {
-  rf_done_t              stack_rf_done;
   gni_post_descriptor_t  stack_post_desc;
   gni_post_descriptor_t* post_desc_p;
   int                    rbi;
@@ -7746,11 +7746,7 @@ void do_fork_post(c_nodeid_t locale,
     // Our completion flag has to be in registered memory so the
     // remote locale can PUT directly back here to it.
     //
-    if (mreg_for_local_addr(&stack_rf_done) != NULL) {
-      p_rf_req->rf_done = &stack_rf_done;
-    } else {
-      p_rf_req->rf_done = rf_done_alloc();
-    }
+    p_rf_req->rf_done = rf_done_alloc();
     *p_rf_req->rf_done = 0;
     chpl_atomic_thread_fence(memory_order_release);
 
@@ -7837,8 +7833,8 @@ void do_fork_post(c_nodeid_t locale,
       local_yield();
     }
 
-    if (p_rf_req->rf_done != &stack_rf_done)
-      rf_done_free(p_rf_req->rf_done);
+    rf_done_free(p_rf_req->rf_done);
+
   } else {
     //
     // Initiate the transaction and if we're out of space retire at least one
