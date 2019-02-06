@@ -454,6 +454,51 @@ static inline void perfstats_add_post(gni_post_descriptor_t* post_desc) {
           CHPL_INTERNAL_ERROR(_gcefBuf);                                \
         } while (0)
 
+static void      local_yield(void);
+//
+// Declarations having to do with locks. 
+//
+
+// Simple wrapper for spinlock with more relaxed orderings and proper yielding
+// for locks. Should only be used when contention is expected to be very low.
+typedef atomic_bool spinlock;
+typedef atomic_bool aligned_spinlock CACHE_LINE_ALIGN;
+static inline void spinlock_init(spinlock* s) {
+  atomic_init_bool(s, false);
+}
+static inline void spinlock_lock(spinlock* s) {
+  while (atomic_exchange_explicit_bool(s, true, memory_order_acquire)) {
+    local_yield();
+  }
+}
+static inline chpl_bool spinlock_trylock(spinlock* s) {
+  return atomic_exchange_explicit_bool(s, true, memory_order_acquire);
+}
+static inline void spinlock_unlock(spinlock* s) {
+  atomic_store_explicit_bool(s, false, memory_order_release);
+}
+static inline void spinlock_destroy(spinlock* s) {
+  atomic_destroy_bool(s);
+}
+
+
+// Simple wrapper for a pthread reader/writer lock with proper yielding for
+// locks. Use the non-blocking calls and yield instead of blocking the thread.
+typedef pthread_rwlock_t rwlock;
+static inline void rwlock_init(rwlock* l) {
+  pthread_rwlock_init(l, NULL);
+}
+static inline void rwlock_writer_lock(rwlock* l) {
+  while (pthread_rwlock_trywrlock(l) == EBUSY) { local_yield(); }
+}
+static inline void rwlock_reader_lock(rwlock* l) {
+  while (pthread_rwlock_tryrdlock(l) == EBUSY) { local_yield(); }
+}
+static inline void rwlock_unlock(rwlock* l) {
+  pthread_rwlock_unlock(l);
+}
+
+
 
 //
 // Declarations having to do with the NIC.
@@ -646,8 +691,8 @@ static chpl_bool exit_without_cleanup = false;
 #define _MPOOL_IDX_T      _MPOOL_IDX_SYM(atomic_)
 
 typedef _MPOOL_IDX_BASE_T mpool_idx_base_t;
-typedef _MPOOL_IDX_T      mpool_idx_t;
-
+typedef _MPOOL_IDX_T      mpool_idx_t CACHE_LINE_ALIGN;
+// TODO can use relaxed atomics?
 static inline
 void mpool_idx_init(mpool_idx_t* pvar, mpool_idx_base_t val) {
   _MPOOL_IDX_SYM(atomic_init_)(pvar, val);
@@ -885,8 +930,8 @@ typedef mpool_idx_base_t rf_done_t;
 typedef mpool_idx_base_t rf_done_pool_t;
 
 static rf_done_pool_t (*rf_done_pool)[RF_DONE_NUM_PER_POOL];
-static mpool_idx_t rf_done_pool_head[RF_DONE_NUM_POOLS];
-static atomic_bool rf_done_pool_lock[RF_DONE_NUM_POOLS];
+static mpool_idx_t rf_done_pool_head[RF_DONE_NUM_POOLS] CACHE_LINE_ALIGN;
+static aligned_spinlock rf_done_pool_lock[RF_DONE_NUM_POOLS] CACHE_LINE_ALIGN;
 
 static mpool_idx_t rf_done_pool_i;
 
@@ -1560,7 +1605,6 @@ static int       post_rdma(c_nodeid_t, gni_post_descriptor_t*);
 static void      post_rdma_and_wait(c_nodeid_t, gni_post_descriptor_t*,
                                     chpl_bool);
 static chpl_bool can_task_yield(void);
-static void      local_yield(void);
 
 
 //
@@ -1783,42 +1827,6 @@ static void dbg_catf(FILE* out_f, const char* in_fname, const char* match)
 
 #endif
 
-
-
-// Simple wrapper for spinlock with more relaxed orderings and proper yielding
-// for locks. Should only be used when contention is expected to be very low.
-typedef atomic_bool spinlock;
-static inline void spinlock_init(spinlock* s) {
-  atomic_init_bool(s, false);
-}
-static inline void spinlock_lock(spinlock* s) {
-  while (atomic_exchange_explicit_bool(s, true, memory_order_acquire)) {
-    local_yield();
-  }
-}
-static inline void spinlock_unlock(spinlock* s) {
-  atomic_store_explicit_bool(s, false, memory_order_release);
-}
-static inline void spinlock_destroy(spinlock* s) {
-  atomic_destroy_bool(s);
-}
-
-
-// Simple wrapper for a pthread reader/writer lock with proper yielding for
-// locks. Use the non-blocking calls and yield instead of blocking the thread.
-typedef pthread_rwlock_t rwlock;
-static inline void rwlock_init(rwlock* l) {
-  pthread_rwlock_init(l, NULL);
-}
-static inline void rwlock_writer_lock(rwlock* l) {
-  while (pthread_rwlock_trywrlock(l) == EBUSY) { local_yield(); }
-}
-static inline void rwlock_reader_lock(rwlock* l) {
-  while (pthread_rwlock_tryrdlock(l) == EBUSY) { local_yield(); }
-}
-static inline void rwlock_unlock(rwlock* l) {
-  pthread_rwlock_unlock(l);
-}
 
 
 //
@@ -4708,7 +4716,7 @@ void rf_done_init(void)
 
     mpool_idx_init(&rf_done_pool_head[i], 0);
 
-    atomic_init_bool(&rf_done_pool_lock[i], false);
+    spinlock_init(&rf_done_pool_lock[i]);
   }
 
   mpool_idx_init(&rf_done_pool_i, 0);
@@ -4739,13 +4747,13 @@ rf_done_t* rf_done_alloc(void)
        pool_tries < 2 * RF_DONE_NUM_POOLS && rf_done_p == NULL;
        pool_tries++, i = (i + 1) % RF_DONE_NUM_POOLS) {
     if (mpool_idx_load(&rf_done_pool_head[i]) >= 0 &&
-        !atomic_exchange_bool(&rf_done_pool_lock[i], true)) {
+        !spinlock_trylock(&rf_done_pool_lock[i])) {
       if ((j = mpool_idx_load(&rf_done_pool_head[i])) >= 0) {
         rf_done_p = &rf_done_pool[i][j];
         mpool_idx_store(&rf_done_pool_head[i], *rf_done_p);
       }
 
-      atomic_store_bool(&rf_done_pool_lock[i], false);
+      spinlock_unlock(&rf_done_pool_lock[i]);
     }
   }
 
@@ -4767,10 +4775,10 @@ void rf_done_free(rf_done_t* rf_done_p)
   //
   // Add this flag back to its pool.
   //
-  while (atomic_exchange_bool(&rf_done_pool_lock[i], true))
-    ;
+  
+  spinlock_lock(&rf_done_pool_lock[i]);
   rf_done_pool[i][j] = mpool_idx_exchange(&rf_done_pool_head[i], j);
-  atomic_store_bool(&rf_done_pool_lock[i], false);
+  spinlock_unlock(&rf_done_pool_lock[i]);
 }
 
 
