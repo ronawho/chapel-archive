@@ -42,7 +42,10 @@
 #define DECL_CHPL_COMM_ATOMIC_WRITE(type)                               \
   void chpl_comm_atomic_write_ ## type                                  \
          (void* desired, c_nodeid_t node, void* object,                 \
-          memory_order order, int ln, int32_t fn);
+          memory_order order, int ln, int32_t fn);                      \
+  void chpl_comm_atomic_write_unordered_ ## type                        \
+         (void* desired, c_nodeid_t node, void* object,                 \
+          int ln, int32_t fn);
 
 DECL_CHPL_COMM_ATOMIC_WRITE(int32)
 DECL_CHPL_COMM_ATOMIC_WRITE(int64)
@@ -61,7 +64,10 @@ DECL_CHPL_COMM_ATOMIC_WRITE(real64)
 #define DECL_CHPL_COMM_ATOMIC_READ(type)                                \
   void chpl_comm_atomic_read_ ## type                                   \
          (void* result, c_nodeid_t node, void* object,                  \
-          memory_order order, int ln, int32_t fn);
+          memory_order order, int ln, int32_t fn);                      \
+  void chpl_comm_atomic_read_unordered_ ## type                         \
+         (void* result, c_nodeid_t node, void* object,                  \
+          int ln, int32_t fn);
 
 DECL_CHPL_COMM_ATOMIC_READ(int32)
 DECL_CHPL_COMM_ATOMIC_READ(int64)

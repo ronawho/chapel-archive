@@ -6669,7 +6669,51 @@ int chpl_comm_addr_gettable(c_nodeid_t node, void* start, size_t len)
             do_remote_put(val, loc, obj, sizeof(_t), remote_mr,         \
                           may_proxy_false);                             \
           }                                                             \
+        }                                                               \
+        void chpl_comm_atomic_write_unordered_##_f(void* val,           \
+                                       int32_t loc,                     \
+                                       void* obj,                       \
+                                       int ln, int32_t fn)              \
+        {                                                               \
+          mem_region_t* remote_mr;                                      \
+          DBG_P_LP(DBGF_IFACE|DBGF_AMO,                                 \
+                   "IFACE chpl_comm_atomic_write_"#_f"(%p, %d, %p)",    \
+                   val, (int) loc, obj);                                \
+                                                                        \
+          if (chpl_numNodes == 1) {                                     \
+            atomic_store_##_t((atomic_##_t*) obj, *(_t*) val);          \
+            return;                                                     \
+          }                                                             \
+                                                                        \
+          chpl_comm_diags_verbose_amo("amo write", loc, ln, fn);        \
+          chpl_comm_diags_incr(amo);                                    \
+          if (IS_32_BIT_AMO_ON_GEMINI(_t)                               \
+              || (remote_mr = mreg_for_remote_addr(obj, loc)) == NULL) {\
+            if (loc == chpl_nodeID)                                     \
+              (void) do_amo_on_cpu(_c, NULL, obj, val, NULL);           \
+            else                                                        \
+              do_fork_amo_##_c##_##_f(obj, NULL, val, NULL, loc);       \
+          }                                                             \
+          else if (nic_type == GNI_DEVICE_GEMINI) {                     \
+            /*                                                          \
+            ** Gemini PUT and AMO are not coherent (Bug 760752) when    \
+            ** the memory segment has GNI_MEM_RELAXED_PI_ORDERING, as   \
+            ** ours does.  Therefore, emulate the PUT using a FAX AMO.  \
+            ** We don't actually need the result and indeed ignore it,  \
+            ** but the corresponding non-fetching AX is broken in       \
+            ** hardware and disabled in ugni.                           \
+            */                                                          \
+            int64_t res;                                                \
+            int64_t mask = 0;                                           \
+            do_nic_amo(&mask, val, loc, obj, sizeof(_t),                \
+                       GNI_FMA_ATOMIC_FAX, &res, remote_mr);            \
+          }                                                             \
+          else {                                                        \
+            do_remote_put_buff(val, loc, obj, sizeof(_t),               \
+                          may_proxy_false);                             \
+          }                                                             \
         }
+
 
 DEFINE_CHPL_COMM_ATOMIC_WRITE(int32, put_32, int_least32_t)
 DEFINE_CHPL_COMM_ATOMIC_WRITE(int64, put_64, int_least64_t)
@@ -6723,6 +6767,35 @@ DEFINE_CHPL_COMM_ATOMIC_WRITE(real64, put_64, int_least64_t)
               do_remote_get(res, loc, obj, sz, may_proxy_false);        \
             else                                                        \
               do_nic_get(res, loc, remote_mr, obj, sz, local_mr);       \
+          }                                                             \
+        }                                                               \
+        void chpl_comm_atomic_read_unordered_##_f(void* res,            \
+                                       int32_t loc,                     \
+                                       void* obj,                       \
+                                       int ln, int32_t fn)              \
+        {                                                               \
+          mem_region_t* remote_mr;                                      \
+          DBG_P_LP(DBGF_IFACE|DBGF_AMO,                                 \
+                   "IFACE chpl_comm_atomic_read_"#_f"(%p, %d, %p)",     \
+                   res, (int) loc, obj);                                \
+                                                                        \
+          if (chpl_numNodes == 1) {                                     \
+            *(_t*) res = atomic_load_##_t((atomic_##_t*) obj);          \
+            return;                                                     \
+          }                                                             \
+                                                                        \
+          chpl_comm_diags_verbose_amo("amo read", loc, ln, fn);         \
+          chpl_comm_diags_incr(amo);                                    \
+          if (IS_32_BIT_AMO_ON_GEMINI(_t)                               \
+              || (remote_mr = mreg_for_remote_addr(obj, loc)) == NULL) {\
+            if (loc == chpl_nodeID)                                     \
+              (void) do_amo_on_cpu(_c, res, obj, NULL, NULL);           \
+            else                                                        \
+              do_fork_amo_##_c##_##_f(obj, res, NULL, NULL, loc);       \
+          }                                                             \
+          else {                                                        \
+            size_t sz = sizeof(_t);                                     \
+            do_remote_get_buff(res, loc, obj, sz, may_proxy_false);     \
           }                                                             \
         }
 
@@ -7188,7 +7261,7 @@ DEFINE_CHPL_COMM_ATOMIC_SUB(real64, double, NEGATE_U_OR_R)
 #undef DEFINE_CHPL_COMM_ATOMIC_SUB
 
 void chpl_comm_atomic_unordered_task_fence(void) {
-  task_local_buff_flush(amo_nf_buff);
+  task_local_buff_flush(amo_nf_buff | get_buff | put_buff);
 }
 
 static
