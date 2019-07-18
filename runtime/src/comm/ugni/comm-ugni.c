@@ -1540,8 +1540,13 @@ static void      do_nic_amo_nf(void*, c_nodeid_t, void*, size_t,
                                gni_fma_cmd_type_t, mem_region_t*);
 static void      do_nic_amo_nf_buff(void*, c_nodeid_t, void*, size_t,
                                     gni_fma_cmd_type_t, mem_region_t*);
+static void      do_nic_amo_buff(void*, void*, c_nodeid_t, void*, size_t,
+                                 gni_fma_cmd_type_t, void*, mem_region_t*);
 static void      do_nic_amo_nf_V(int, uint64_t*, c_nodeid_t*, void**, size_t*,
                                  gni_fma_cmd_type_t*, mem_region_t**);
+static void      do_nic_amo_V(int, uint64_t*, uint64_t*, c_nodeid_t*, void**, size_t*,
+                                 gni_fma_cmd_type_t*, void**, mem_region_t**, mem_region_t**);
+
 static void      amo_add_real32_cpu_cmpxchg(void*, void*, void*);
 static void      amo_add_real64_cpu_cmpxchg(void*, void*, void*);
 static void      fork_call_common(int, c_sublocid_t,
@@ -1808,8 +1813,9 @@ chpl_comm_taskPrvData_t* get_comm_taskPrvdata(void) {
 
 enum BuffType {
   amo_nf_buff = 1 << 0,
-  get_buff    = 1 << 1,
-  put_buff    = 1 << 2
+  amo_buff    = 1 << 1,
+  get_buff    = 1 << 2,
+  put_buff    = 1 << 3
 };
 
 // Per task information about non-fetching AMO buffers
@@ -1822,6 +1828,20 @@ typedef struct {
   gni_fma_cmd_type_t cmd_v[MAX_CHAINED_AMO_LEN];
   mem_region_t*      remote_mr_v[MAX_CHAINED_AMO_LEN];
 } amo_nf_buff_task_info_t;
+
+// Per task information about fetching AMO buffers
+typedef struct {
+  int                vi;
+  uint64_t           opnd1_v[MAX_CHAINED_AMO_LEN];
+  uint64_t           opnd2_v[MAX_CHAINED_AMO_LEN];
+  c_nodeid_t         locale_v[MAX_CHAINED_AMO_LEN];
+  void*              object_v[MAX_CHAINED_AMO_LEN];
+  size_t             size_v[MAX_CHAINED_AMO_LEN];
+  gni_fma_cmd_type_t cmd_v[MAX_CHAINED_AMO_LEN];
+  void*              result_v[MAX_CHAINED_AMO_LEN];
+  mem_region_t*      local_mr_v[MAX_CHAINED_AMO_LEN];
+  mem_region_t*      remote_mr_v[MAX_CHAINED_AMO_LEN];
+} amo_buff_task_info_t;
 
 // Per task information about GET buffers
 typedef struct {
@@ -1864,6 +1884,7 @@ void* task_local_buff_acquire(enum BuffType t) {
   }
 
   DEFINE_INIT(amo_nf_buff_task_info_t, amo_nf_buff);
+  DEFINE_INIT(amo_buff_task_info_t, amo_buff);
   DEFINE_INIT(get_buff_task_info_t, get_buff);
   DEFINE_INIT(put_buff_task_info_t, put_buff);
 
@@ -1872,6 +1893,7 @@ void* task_local_buff_acquire(enum BuffType t) {
 }
 
 static void amo_nf_buff_task_info_flush(amo_nf_buff_task_info_t* info);
+static void amo_buff_task_info_flush(amo_buff_task_info_t* info);
 static void get_buff_task_info_flush(get_buff_task_info_t* info);
 static void put_buff_task_info_flush(put_buff_task_info_t* info);
 
@@ -1890,6 +1912,7 @@ void task_local_buff_flush(enum BuffType t) {
   }
 
   DEFINE_FLUSH(amo_nf_buff_task_info_t, amo_nf_buff, amo_nf_buff_task_info_flush);
+  DEFINE_FLUSH(amo_buff_task_info_t, amo_buff, amo_buff_task_info_flush);
   DEFINE_FLUSH(get_buff_task_info_t, get_buff, get_buff_task_info_flush);
   DEFINE_FLUSH(put_buff_task_info_t, put_buff, put_buff_task_info_flush);
 
@@ -1913,6 +1936,7 @@ void task_local_buff_end(enum BuffType t) {
   }
 
   DEFINE_END(amo_nf_buff_task_info_t, amo_nf_buff, amo_nf_buff_task_info_flush);
+  DEFINE_END(amo_buff_task_info_t, amo_buff, amo_buff_task_info_flush);
   DEFINE_END(get_buff_task_info_t, get_buff, get_buff_task_info_flush);
   DEFINE_END(put_buff_task_info_t, put_buff, put_buff_task_info_flush);
 
@@ -2044,7 +2068,7 @@ int chpl_comm_run_in_gdb(int argc, char* argv[], int gdbArgnum, int* status)
 }
 
 void chpl_comm_task_end(void) {
-  task_local_buff_end(get_buff | put_buff | amo_nf_buff);
+  task_local_buff_end(get_buff | put_buff | amo_nf_buff | amo_buff);
 }
 
 void chpl_comm_post_task_init(void)
@@ -5674,7 +5698,7 @@ void do_nic_amo_nf_V(int v_len, uint64_t* opnd1_v, c_nodeid_t* locale_v,
   // If there are more than we can handle at once, block them up.
   //
   while (v_len > MAX_CHAINED_AMO_LEN) {
-    do_nic_amo_nf_V(MAX_CHAINED_PUT_LEN, opnd1_v, locale_v, object_v,
+    do_nic_amo_nf_V(MAX_CHAINED_AMO_LEN, opnd1_v, locale_v, object_v,
                     size_v, cmd_v, remote_mr_v);
     v_len -= MAX_CHAINED_AMO_LEN;
     opnd1_v += MAX_CHAINED_AMO_LEN;
@@ -5742,6 +5766,99 @@ void do_nic_amo_nf_V(int v_len, uint64_t* opnd1_v, c_nodeid_t* locale_v,
 #endif // HAVE_GNI_FMA_CHAIN_TRANSACTIONS
 }
 
+static
+void do_nic_amo_V(int v_len, uint64_t* opnd1_v, uint64_t* opnd2_v, c_nodeid_t* locale_v,
+                     void** object_v, size_t* size_v,
+                     gni_fma_cmd_type_t* cmd_v, void** result_v, mem_region_t** local_mr_v,  mem_region_t** remote_mr_v)
+{
+
+#if HAVE_GNI_FMA_CHAIN_TRANSACTIONS
+
+  //
+  // This GNI is new enough to support chained transactions.
+  //
+
+  //
+  // If there are more than we can handle at once, block them up.
+  //
+  while (v_len > MAX_CHAINED_AMO_LEN) {
+    do_nic_amo_V(MAX_CHAINED_AMO_LEN, opnd1_v, opnd2_v, locale_v, object_v,
+                 size_v, cmd_v, result_v, local_mr_v, remote_mr_v);
+    v_len -= MAX_CHAINED_AMO_LEN;
+    opnd1_v += MAX_CHAINED_AMO_LEN;
+    opnd2_v += MAX_CHAINED_AMO_LEN;
+    locale_v += MAX_CHAINED_AMO_LEN;
+    object_v += MAX_CHAINED_AMO_LEN;
+    size_v += MAX_CHAINED_AMO_LEN;
+    cmd_v += MAX_CHAINED_AMO_LEN;
+    result_v += MAX_CHAINED_AMO_LEN;
+    local_mr_v += MAX_CHAINED_AMO_LEN;
+    remote_mr_v += MAX_CHAINED_AMO_LEN;
+  }
+
+  gni_post_descriptor_t post_desc;
+  gni_ct_amo_post_descriptor_t pdc[MAX_CHAINED_AMO_LEN - 1];
+  int vi, ci;
+
+  if (v_len <= 0)
+    return;
+
+  //
+  // Build up the base post descriptor
+  //
+  post_desc.next_descr      = NULL;
+  post_desc.type            = GNI_POST_AMO;
+  post_desc.cq_mode         = GNI_CQMODE_GLOBAL_EVENT;
+  post_desc.dlvr_mode       = GNI_DLVMODE_PERFORMANCE;
+  post_desc.rdma_mode       = 0;
+  post_desc.src_cq_hndl     = 0;
+  post_desc.local_addr      = (uint64_t) (intptr_t) result_v[0];
+  post_desc.local_mem_hndl  = local_mr_v[0]->mdh;
+
+  post_desc.remote_addr     = (uint64_t) (intptr_t) object_v[0];
+  post_desc.remote_mem_hndl = remote_mr_v[0]->mdh;
+  post_desc.length          = size_v[0];
+  post_desc.amo_cmd         = cmd_v[0];
+  post_desc.first_operand   = opnd1_v[0];
+  post_desc.second_operand  = opnd2_v[0];
+
+  //
+  // Build up the chain of descriptors
+  //
+  for (vi=1, ci=0; vi<v_len; vi++, ci++) {
+    if (ci == 0)
+      post_desc.next_descr  = &pdc[0];
+    else
+      pdc[ci-1].next_descr  = &pdc[ci];
+    pdc[ci].next_descr      = NULL;
+    pdc[ci].local_addr      = (uint64_t) (intptr_t) result_v[vi];
+    pdc[ci].local_mem_hndl  = local_mr_v[vi]->mdh;
+    pdc[ci].remote_addr     = (uint64_t) (intptr_t) object_v[vi];
+    pdc[ci].remote_mem_hndl = remote_mr_v[vi]->mdh;
+    pdc[ci].length          = size_v[vi];
+    pdc[ci].amo_cmd         = cmd_v[vi];
+    pdc[ci].first_operand   = opnd1_v[vi];
+    pdc[ci].second_operand  = opnd2_v[vi];
+  }
+
+  //
+  // Initiate the transaction and wait for it to complete.
+  //
+  post_fma_ct_and_wait(locale_v, &post_desc);
+
+#else // HAVE_GNI_FMA_CHAIN_TRANSACTIONS
+
+  //
+  // This GNI is too old to support chained transactions.  Just do
+  // normal ones.
+  //
+  for (int vi = 0; vi < v_len; vi++) {
+    do_nic_amo(&opnd1_v[vi], &opnd2_v[vi], locale_v[vi], object_v[vi], size_v[vi],
+                  cmd_v[vi], result_v[vi], remote_mr_v[vi]);
+  }
+
+#endif // HAVE_GNI_FMA_CHAIN_TRANSACTIONS
+}
 
 void chpl_comm_getput_unordered(c_nodeid_t dst_locale, void* dst_addr,
                                 c_nodeid_t src_locale, void* src_addr,
@@ -6975,9 +7092,32 @@ DEFINE_CHPL_COMM_ATOMIC_CMPXCHG(real64, cmpxchg_64, int_least64_t)
                                                 void* res,              \
                                                 int ln, int32_t fn)     \
         {                                                               \
-          chpl_comm_atomic_fetch_##_o##_##_f(opnd, loc, obj, res,       \
-                                             memory_order_seq_cst,      \
-                                             ln, fn);                   \
+          mem_region_t* remote_mr;                                      \
+          DBG_P_LP(DBGF_IFACE|DBGF_AMO,                                 \
+                   "IFACE chpl_comm_atomic_fetch_unordered_"#_o"_"#_f   \
+                   "(%p, %d, %p, %p)",                                  \
+                   opnd, (int) loc, obj, res);                          \
+                                                                        \
+          if (chpl_numNodes == 1) {                                     \
+            *(_t*) res =                                                \
+              atomic_fetch_##_o##_##_t((atomic_##_t*) obj,              \
+                                       *(_t*) opnd);                    \
+            return;                                                     \
+          }                                                             \
+                                                                        \
+          chpl_comm_diags_verbose_amo("amo fetch_un" #_o, loc, ln, fn); \
+          chpl_comm_diags_incr(amo);                                    \
+          if (IS_32_BIT_AMO_ON_GEMINI(_t)                               \
+              || (remote_mr = mreg_for_remote_addr(obj, loc)) == NULL) {\
+            if (loc == chpl_nodeID)                                     \
+              (void) do_amo_on_cpu(_c, res, obj, opnd, NULL);           \
+            else                                                        \
+              do_fork_amo_##_c##_##_f(obj, res, opnd, NULL, loc);       \
+          }                                                             \
+          else {                                                        \
+            do_nic_amo_buff(opnd, NULL, loc, obj, sizeof(_t),           \
+                            amo_cmd_2_nic_op(_c, 1), res, remote_mr);   \
+          }                                                             \
         }
 
 DEFINE_CHPL_COMM_ATOMIC_INT_OP(int32, and, and_i32, int_least32_t)
@@ -7224,7 +7364,7 @@ DEFINE_CHPL_COMM_ATOMIC_SUB(real64, double, NEGATE_U_OR_R)
 #undef DEFINE_CHPL_COMM_ATOMIC_SUB
 
 void chpl_comm_atomic_unordered_task_fence(void) {
-  task_local_buff_flush(amo_nf_buff);
+  task_local_buff_flush(amo_nf_buff | amo_buff);
 }
 
 static
@@ -7319,6 +7459,64 @@ void do_nic_amo_nf_buff(void* opnd1, c_nodeid_t locale,
   }
 
 }
+static inline
+void amo_buff_task_info_flush(amo_buff_task_info_t* info) {
+  if (info->vi > 0) {
+    //for (int i=0; i<info->vi; i++) {
+    //  do_nic_amo(&info->opnd1_v[i], &info->opnd2_v[i], info->locale_v[i],
+    //             info->object_v[i], info->size_v[i], info->cmd_v[i],
+    //             info->result_v[i], info->remote_mr_v[i]);
+    //}
+    do_nic_amo_V(info->vi, info->opnd1_v, info->opnd2_v, info->locale_v,
+                 info->object_v, info->size_v, info->cmd_v, info->result_v,
+                 info->local_mr_v, info->remote_mr_v);
+    info->vi = 0;
+  }
+}
+
+// Append to task local buffers of operations and flush if full
+static inline
+void do_nic_amo_buff(void* opnd1, void* opnd2, c_nodeid_t locale,
+                     void* object, size_t size,
+                     gni_fma_cmd_type_t cmd, void* result,
+                     mem_region_t* remote_mr)
+{
+  mem_region_t* local_mr = NULL;
+  if (result != NULL)  {
+    local_mr = mreg_for_local_addr(result);
+  }
+
+  amo_buff_task_info_t* info = task_local_buff_acquire(amo_buff);
+  if (info == NULL || (result != NULL && local_mr == NULL)) {
+    do_nic_amo(opnd1, opnd2, locale, object, size, cmd, result, remote_mr);
+    return;
+  }
+
+  int vi = info->vi;
+  // append arguments to buffers
+  info->opnd1_v[vi]     = size == 4 ? *(uint32_t*) opnd1:
+                                      *(uint64_t*) opnd1;
+  if (opnd2 != NULL)
+    info->opnd2_v[vi]   = size == 4 ? *(uint32_t*) opnd2:
+                                      *(uint64_t*) opnd2;
+  info->locale_v[vi]    = locale;
+  info->object_v[vi]    = object;
+  info->size_v[vi]      = size;
+  info->cmd_v[vi]       = cmd;
+  if (result != NULL) {
+    info->result_v[vi]  = result;
+    info->local_mr_v[vi] = local_mr;
+  }
+  info->remote_mr_v[vi] = remote_mr;
+  info->vi++;
+
+  // flush if buffers are full
+  if (info->vi == MAX_CHAINED_AMO_LEN) {
+    amo_buff_task_info_flush(info);
+  }
+
+}
+
 /*** END OF NON-FETCHING BUFFERED ATOMIC OPERATIONS ***/
 
 
