@@ -28,7 +28,8 @@ module ChapelTaskData {
   // 1 byte for serial_state
   private const chpl_offset_endCount = 0:size_t;
   private const chpl_offset_serial = sizeof_endcount_ptr();
-  private const chpl_offset_end = chpl_offset_serial+1;
+  private const chpl_offset_same_spawn = chpl_offset_serial+1;
+  private const chpl_offset_end = chpl_offset_same_spawn+1;
 
   // What is the size of a wide _EndCount pointer?
   private
@@ -100,6 +101,29 @@ module ChapelTaskData {
     return v == 1;
   }
 
+  proc chpl_task_data_setSameSpawn(tls:c_ptr(chpl_task_ChapelData_t), makeSameSpawn: bool) : void {
+    var prv = tls:c_ptr(c_uchar);
+    var i = chpl_offset_same_spawn;
+    var v:uint(8) = 0;
+    if makeSameSpawn then
+      v = 1;
+    // Using memcpy to avoid pointer type punning
+    c_memcpy(c_ptrTo(prv[i]), c_ptrTo(v), c_sizeof(uint(8)));
+  }
+  proc chpl_task_data_getSameSpawn(tls:c_ptr(chpl_task_ChapelData_t)) : bool {
+    var ret:bool = false;
+    var prv = tls:c_ptr(c_uchar);
+    var i = chpl_offset_same_spawn;
+    var v:uint(8) = 0;
+    // Using memcpy to avoid pointer type punning
+    c_memcpy(c_ptrTo(v), c_ptrTo(prv[i]), c_sizeof(uint(8)));
+    // check we got 1 or 0 if bounds checking is on
+    // (to detect runtime implementation errors where this part of
+    //  the argument bundle is stack trash)
+    if boundsChecking then
+      assert(v == 0 || v == 1);
+    return v == 1;
+  }
 
   // These functions are like the above but first get the pointer
   // to the task local storage region for the currently executing task.
@@ -117,6 +141,13 @@ module ChapelTaskData {
   }
   export proc chpl_task_getSerial() : bool {
     return chpl_task_data_getSerial(chpl_task_getChapelData());
+  }
+
+   proc chpl_task_setSameSpawn(makeSameSpawn: bool) : void {
+    chpl_task_data_setSameSpawn(chpl_task_getChapelData(), makeSameSpawn);
+  }
+   proc chpl_task_getSameSpawn() : bool {
+    return chpl_task_data_getSameSpawn(chpl_task_getChapelData());
   }
 
 

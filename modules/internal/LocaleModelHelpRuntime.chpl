@@ -133,6 +133,16 @@ module LocaleModelHelpRuntime {
   extern proc chpl_task_executeTasksInList(ref tlist: c_void_ptr);
   extern proc chpl_task_yield();
 
+  // Hacky mechanism to spawn a new task to the current worker thread (only
+  // works with qthreads default scheduler -- nemesis)
+  proc getSubloc(dflt_subloc: int) {
+    if CHPL_TASKS == "qthreads" && chpl_task_getSameSpawn() {
+      extern proc qthread_shep(): int;
+      return qthread_shep();
+    }
+    return dflt_subloc;
+  }
+
   //
   // add a task to a list of tasks being built for a begin statement
   //
@@ -152,7 +162,7 @@ module LocaleModelHelpRuntime {
     } else {
       chpl_task_data_setup(args, tls);
       chpl_task_addToTaskList(fn, args, args_size,
-                              subloc_id, tlist, tlist_node_id, true);
+                              getSubloc(subloc_id), tlist, tlist_node_id, true);
     }
   }
 
@@ -176,7 +186,7 @@ module LocaleModelHelpRuntime {
     } else {
       chpl_task_data_setup(args, tls);
       chpl_task_addToTaskList(fn, args, args_size,
-                              subloc_id, tlist, tlist_node_id, false);
+                              getSubloc(subloc_id), tlist, tlist_node_id, false);
      }
   }
 
