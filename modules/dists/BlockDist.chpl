@@ -1482,6 +1482,7 @@ where canDoAnyToBlock(this, destDom, Src, srcDom) {
   return true;
 }
 
+config const minBulkTransTasks = 16;
 // For assignments of the form: DefaultRectangular = Block
 proc BlockArr.doiBulkTransferToKnown(srcDom, Dest:DefaultRectangularArr, destDom) : bool
 where !disableBlockDistBulkTransfer {
@@ -1489,20 +1490,27 @@ where !disableBlockDistBulkTransfer {
   if debugBlockDistBulkTransfer then
     writeln("In BlockDist.doiBulkTransferToKnown(DefaultRectangular)");
 
-  coforall j in dom.dist.activeTargetLocales(srcDom) {
-    on dom.dist.targetLocales(j) {
+  var activeLocs = dom.dist.activeTargetLocales(srcDom);
+
+  use RangeChunk;
+  const numTasks = min(activeLocs.domain.size, minBulkTransTasks);
+  chpl_task_setSameSpawn(true);
+  coforall tid in 0..#numTasks {
+  for j in chunk(activeLocs.domain.low..activeLocs.domain.high, numTasks, tid) {
+      const j_offset = ((j + here.id) % activeLocs.domain.size) + activeLocs.domain.low;
       const Src = if _privatization then chpl_getPrivatizedCopy(this.type, pid) else this;
-      const inters = Src.dom.locDoms(j).myBlock[srcDom];
+      const inters = Src.dom.locDoms(activeLocs[j_offset]).myBlock[srcDom];
 
       const destChunk = bulkCommTranslateDomain(inters, srcDom, destDom);
 
       if debugBlockDistBulkTransfer then
         writeln("  A[",destChunk,"] = B[",inters,"]");
 
-      const elemActual = Src.locArr[j].myElems._value;
+      const elemActual = Src.locArr[activeLocs[j_offset]].myElems._value;
       chpl__bulkTransferArray(Dest, destChunk, elemActual, inters);
-    }
   }
+  }
+  chpl_task_setSameSpawn(false);
 
   return true;
 }
