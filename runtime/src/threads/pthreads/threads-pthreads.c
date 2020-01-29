@@ -398,8 +398,8 @@ void chpl_thread_init(void(*threadBeginFn)(void*),
     //
     // Cygwin can't do setrlimit(RLIMIT_STACK).
     //
-    if (setrlimit(RLIMIT_STACK, &rlim) != 0)
-      chpl_internal_error("setrlimit() failed");
+    //if (setrlimit(RLIMIT_STACK, &rlim) != 0)
+    //  chpl_internal_error("setrlimit() failed");
 #endif
 
     if (pthread_attr_setstacksize(&thread_attributes, css) != 0)
