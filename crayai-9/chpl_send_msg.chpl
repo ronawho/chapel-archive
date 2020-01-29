@@ -18,7 +18,8 @@ export proc sendMsg() {
   socket.send("hello");
   var message = socket.recv(string);
   writeln(mydate(), " received message: ", message);
-  sleep(10);
+
+  sleep(5);
 
   writeln("SEND() CHPL: sending msg2");
   socket.send("world");
